@@ -140,10 +140,10 @@ def _admin_main_menu_keyboard():
         [InlineKeyboardButton("📢 Sponsor Channel Settings", callback_data="admin_channel_settings")],
         [InlineKeyboardButton("☎️ Support Address Settings", callback_data="admin_support_settings")],
         [InlineKeyboardButton("🎁 Gift & Bonus Settings", callback_data="admin_bonus_settings")],
-        [InlineKeyboardButton("💳 Payment Settings", callback_data="admin_payment_settings")],   # <-- جدید
+        [InlineKeyboardButton("💳 Payment Settings", callback_data="admin_payment_settings")],
+        [InlineKeyboardButton("🚨 مدیریت طرح اضطراری", callback_data="emg_admin_menu")],   # ← خط جدید
     ]
     return InlineKeyboardMarkup(keyboard)
-
 
 async def admin_back_to_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Back to the top-level admin panel (from a submenu, via callback)"""
