@@ -3,6 +3,8 @@ import asyncio
 import logging
 import sys
 import traceback
+import emergency_plan
+
 from datetime import datetime
 from telegram import Update, BotCommand
 from telegram.ext import (
@@ -205,7 +207,11 @@ def main():
     # Initialize admin list
     admin_ids = config.get_admin_ids()
     set_admin_ids(admin_ids)
-    
+
+    emergency_plan.set_db(db)
+    emergency_plan.set_admin_ids(admin_ids)
+    emergency_plan.set_get_main_menu(handlers.get_main_menu)
+
     set_get_main_menu(handlers.get_main_menu)
     send_gift.set_get_main_menu(handlers.get_main_menu)
 
