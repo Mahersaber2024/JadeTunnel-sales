@@ -391,25 +391,13 @@ async def admin_reject_payment(update: Update, context: ContextTypes.DEFAULT_TYP
     PENDING_PAYMENTS.pop(request_id, None)
    
 def get_main_menu():
-    """Create main menu keyboard"""
     keyboard = [
         [KeyboardButton("🛒 خرید VPN")],
-        [
-            KeyboardButton("🗂 حساب کاربری"),
-            KeyboardButton("📒 اشتراک ها")
-        ],
-        [
-            KeyboardButton("📝 راهنما"),
-            KeyboardButton("💰 افزایش موجودی")
-        ],
-        [
-            KeyboardButton("➕ افزایش حجم اضافی"),
-            KeyboardButton("📨 پشتیبانی")
-        ],
-        [
-            KeyboardButton("👥 دعوت از دوستان"),
-            KeyboardButton("🎁 ارسال هدیه")
-        ]
+        [KeyboardButton("🗂 حساب کاربری"), KeyboardButton("📒 اشتراک ها")],
+        [KeyboardButton("📝 راهنما"), KeyboardButton("💰 افزایش موجودی")],
+        [KeyboardButton("➕ افزایش حجم اضافی"), KeyboardButton("📨 پشتیبانی")],
+        [KeyboardButton("👥 دعوت از دوستان"), KeyboardButton("🎁 ارسال هدیه")],
+        [KeyboardButton("🚨 طرح اضطراری")]   # ← خط جدید
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
