@@ -434,6 +434,14 @@ async def ensure_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_membership_required():
         return True
 
+    user_id = update.effective_user.id
+    
+    # ============ بررسی ادمین بودن ============
+    # ادمین‌ها نیازی به عضویت در کانال ندارند
+    from admin import is_admin
+    if is_admin(user_id):
+        return True
+
     if await check_channel_membership(update, context):
         return True
 
