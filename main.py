@@ -504,6 +504,52 @@ def main():
     )
     application.add_handler(admin_card_info_conv)
 
+    # ---------- ویرایش متن پروکسی/کانفیگ ----------
+    emergency_proxy_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(emergency_plan.emergency_edit_proxy_start, pattern="^emg_edit_proxy$")],
+        states={
+            emergency_plan.EMERGENCY_PROXY_EDIT_INPUT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, emergency_plan.emergency_edit_proxy_input)
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", admin_cancel)]
+    )
+    application.add_handler(emergency_proxy_conv)
+
+    emergency_config_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(emergency_plan.emergency_edit_config_start, pattern="^emg_edit_config$")],
+        states={
+            emergency_plan.EMERGENCY_CONFIG_EDIT_INPUT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, emergency_plan.emergency_edit_config_input)
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", admin_cancel)]
+    )
+    application.add_handler(emergency_config_conv)
+
+    application.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, emergency_plan.emergency_admin_custom_days_input),
+        group=-1
+    )
+
+    # ---------- مدیریت اعضا (لیست/حذف) ----------
+    application.add_handler(CallbackQueryHandler(emergency_plan.emergency_admin_menu, pattern="^emg_admin_menu$"))
+    application.add_handler(CallbackQueryHandler(emergency_plan.emergency_list_members, pattern="^emg_list_members$"))
+    application.add_handler(CallbackQueryHandler(emergency_plan.emergency_remove_member, pattern="^emg_remove_"))
+
+    # ---------- سمت کاربر ----------
+    application.add_handler(CallbackQueryHandler(emergency_plan.emergency_request, pattern="^emergency_request$"))
+    application.add_handler(CallbackQueryHandler(emergency_plan.emergency_get_proxy, pattern="^emergency_get_proxy$"))
+    application.add_handler(CallbackQueryHandler(emergency_plan.emergency_get_config, pattern="^emergency_get_config$"))
+
+    # ---------- تایید/رد/تعیین مدت توسط ادمین ----------
+    application.add_handler(CallbackQueryHandler(emergency_plan.emergency_admin_approve, pattern="^emg_approve_"))
+    application.add_handler(CallbackQueryHandler(emergency_plan.emergency_admin_reject, pattern="^emg_reject_"))
+    application.add_handler(CallbackQueryHandler(emergency_plan.emergency_admin_set_days, pattern="^emg_days_"))
+    application.add_handler(CallbackQueryHandler(emergency_plan.emergency_admin_custom_days_start, pattern="^emg_customdays_"))
+    application.add_handler(CallbackQueryHandler(emergency_plan.emergency_admin_cancel_approve, pattern="^emg_cancelapprove_"))
+
+
     application.add_handler(CallbackQueryHandler(admin_commission_settings_menu, pattern="^admin_commission_settings$"))
     application.add_handler(CallbackQueryHandler(admin_commission_select_panel, pattern="^admin_commission_select_panel$"))
     application.add_handler(CallbackQueryHandler(admin_commission_set_panel, pattern="^admin_commission_set_panel_"))
