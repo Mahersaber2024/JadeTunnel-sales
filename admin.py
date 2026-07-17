@@ -1385,12 +1385,18 @@ async def admin_panel_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     status = "✅" if success else "❌"
+
+    keyboard = [
+        [InlineKeyboardButton("🔙 Back", callback_data=f"panel_info_{panel_id}")]
+    ]
+
     await query.edit_message_text(
         f"{status} Connection Test Result\n\n"
         f"📛 Panel: {panel.get('name')}\n"
         f"🌐 Address: {panel.get('panel_base')}\n"
         f"📊 Result: {msg}",
-        parse_mode=None  # Changed from Markdown to None
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode=None
     )
 
 # ============ Admin Support Address Settings ============
