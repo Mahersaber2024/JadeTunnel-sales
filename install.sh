@@ -148,33 +148,52 @@ PYEOF
   fi
 }
 
+collect_iran_host_config(){
+  echo
+  echo "======================================"
+  echo "     Iran Host Settings"
+  echo "======================================"
+  read -rp "Your Iran host domain (e.g. https://heysolo.ir): " IRAN_HOST_URL
+  IRAN_HOST_URL=${IRAN_HOST_URL:-https://heysolo.ir}
+  IRAN_HOST_URL=$(echo "$IRAN_HOST_URL" | sed 's:/*$::')
+  ok "Iran host domain saved."
+}
+
 collect_ssl_config(){
   echo
   echo "======================================"
-  echo "     SSL Configuration"
+  echo "     SSL Configuration (optional)"
   echo "======================================"
-  read -rp "Domain for subscription API (e.g. pio.heysolo.ir): " SSL_DOMAIN
-  while [[ -z "$SSL_DOMAIN" ]]; do
-    read -rp "Domain is required: " SSL_DOMAIN
-  done
+  read -rp "Do you want to enable HTTPS for sub API? (y/n) [y]: " ENABLE_SSL
+  ENABLE_SSL=${ENABLE_SSL:-y}
+  
+  if [[ "$ENABLE_SSL" =~ ^[Yy]$ ]]; then
+    read -rp "Domain for subscription API (e.g. pio.heysolo.ir): " SSL_DOMAIN
+    while [[ -z "$SSL_DOMAIN" ]]; do
+      read -rp "Domain is required: " SSL_DOMAIN
+    done
 
-  SSL_EMAIL="admin@${SSL_DOMAIN}"
-  info "Using email: $SSL_EMAIL"
+    SSL_EMAIL="admin@${SSL_DOMAIN}"
+    info "Using email: $SSL_EMAIL"
 
-  SERVER_IP=$(curl -s ifconfig.me || curl -s icanhazip.com || echo "127.0.0.1")
-  info "This server's IP: $SERVER_IP"
+    SERVER_IP=$(curl -s ifconfig.me || curl -s icanhazip.com || echo "127.0.0.1")
+    info "This server's IP: $SERVER_IP"
 
-  systemctl stop nginx 2>/dev/null || true
-  if certbot certonly --standalone -d "${SSL_DOMAIN}" --non-interactive --agree-tos --register-unsafely-without-email --email "${SSL_EMAIL}"; then
-    SSL_CERT_PATH="/etc/letsencrypt/live/${SSL_DOMAIN}/fullchain.pem"
-    SSL_KEY_PATH="/etc/letsencrypt/live/${SSL_DOMAIN}/privkey.pem"
-    ok "SSL certificate obtained successfully."
+    systemctl stop nginx 2>/dev/null || true
+    if certbot certonly --standalone -d "${SSL_DOMAIN}" --non-interactive --agree-tos --register-unsafely-without-email --email "${SSL_EMAIL}"; then
+      SSL_CERT_PATH="/etc/letsencrypt/live/${SSL_DOMAIN}/fullchain.pem"
+      SSL_KEY_PATH="/etc/letsencrypt/live/${SSL_DOMAIN}/privkey.pem"
+      ok "SSL certificate obtained successfully."
+    else
+      warn "SSL certificate failed. HTTPS will be disabled."
+      SSL_CERT_PATH=""
+      SSL_KEY_PATH=""
+    fi
+    systemctl start nginx 2>/dev/null || true
   else
-    warn "SSL certificate failed. HTTPS will be disabled."
     SSL_CERT_PATH=""
     SSL_KEY_PATH=""
   fi
-  systemctl start nginx 2>/dev/null || true
 }
 
 write_config_json(){
@@ -301,51 +320,54 @@ EOF
 }
 
 # ============================================================
-# ========== نمایش راهنمای تست در پایان نصب ==========
+# ========== Post-Installation Test Guide ==========
 # ============================================================
 show_test_guide(){
   local protocol="http"
-  local ssl_status="❌ SSL غیرفعال"
   local domain="${SSL_DOMAIN:-localhost}"
+  local port="2053"
 
   if [[ -n "${SSL_CERT_PATH:-}" && -n "${SSL_KEY_PATH:-}" ]]; then
     protocol="https"
-    ssl_status="✅ SSL فعال"
   fi
 
   echo ""
   echo "============================================================"
-  echo "                   🔍 راهنمای تست سرویس"
+  echo "                   🔍 Service Test Guide"
   echo "============================================================"
   echo ""
-  echo "  📌 سرویس‌ها:"
-  echo "     🔹 ربات تلگرام: systemctl status ${SERVICE_NAME}"
-  echo "     🔹 سرویس اشتراک: systemctl status ${SUB_SERVICE_NAME}"
+  echo "  📌 Services:"
+  echo "     🔹 Telegram Bot   : systemctl status ${SERVICE_NAME}"
+  echo "     🔹 Subscription API: systemctl status ${SUB_SERVICE_NAME}"
   echo ""
-  echo "  📌 تست از داخل سرور (خود这台):"
-  echo "     curl ${protocol}://127.0.0.1:2053/health"
+  echo "  📌 Test from inside the server:"
+  echo "     curl ${protocol}://127.0.0.1:${port}/health"
   echo ""
-  echo "  📌 تست از خارج سرور (با دامنه):"
-  echo "     curl ${protocol}://${domain}:2053/health"
+  echo "  📌 Test from outside (with domain):"
+  echo "     curl ${protocol}://${domain}:${port}/health"
   echo ""
-  echo "  📌 اگر پاسخ 'ok' دریافت کردید، یعنی سرویس سالم است."
+  echo "  📌 If you receive 'ok', the service is working correctly."
   echo ""
-  echo "  📌 لینک اشتراک نمونه برای کاربران:"
-  echo "     https://your-iran-host.com/sub/USER_TOKEN"
+  echo "  📌 Sample subscription link for users:"
+  echo "     ${IRAN_HOST_URL}/sub/USER_TOKEN"
   echo ""
-  echo "  📌 برای مشاهده لاگ‌ها:"
+  echo "  📌 View logs:"
   echo "     journalctl -u ${SERVICE_NAME} -f"
   echo "     journalctl -u ${SUB_SERVICE_NAME} -f"
   echo ""
-  echo "  📌 فایل index.php برای هاست ایران:"
-  echo "     ${INSTALL_DIR}/index.php"
-  echo "     این فایل را در هاست ایران در مسیر /sub/index.php قرار دهید."
+  echo "  📌 index.php file for Iran host:"
+  echo "     📂 File location on this server: ${INSTALL_DIR}/index.php"
+  echo "     📤 Upload this file to your Iran host at /sub/index.php (root of the site)."
+  echo "     ✏️  Before uploading, change API_BASE in index.php to your sub_api address."
+  echo ""
+  echo "  🔧 Example: If sub_api is running on https://pio.heysolo.ir:2053"
+  echo "     const API_BASE = 'https://pio.heysolo.ir:2053';"
   echo ""
   echo "============================================================"
 }
 
 # ============================================================
-# ========== توابع اصلی ==========
+# ========== Main Functions ==========
 # ============================================================
 
 full_install(){
@@ -355,6 +377,7 @@ full_install(){
   install_system_packages
   setup_database
   collect_bot_config
+  collect_iran_host_config
   collect_ssl_config
   clone_or_update_repo
   write_config_json "${INSTALL_DIR}"
