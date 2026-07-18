@@ -3,6 +3,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from datetime import datetime, timedelta
 from typing import Optional
+import secrets
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +119,17 @@ class Database:
             if not cursor.fetchone():
                 cursor.execute("ALTER TABLE subscriptions ADD COLUMN panel_id VARCHAR(50) DEFAULT NULL")
                 logger.info("✅ Added panel_id column to subscriptions table")
-        
+
+            # Check sub_token
+            cursor.execute("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name='users' AND column_name='sub_token'
+            """)
+            if not cursor.fetchone():
+                cursor.execute("ALTER TABLE users ADD COLUMN sub_token VARCHAR(64) UNIQUE DEFAULT NULL")
+                logger.info("✅ Added sub_token column to users table")
+    
             # Commit all changes at once
             self.conn.commit()
             cursor.close()
@@ -188,6 +199,18 @@ class Database:
                 )
             """)
             
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS emergency_access (
+                    user_id BIGINT PRIMARY KEY,
+                    access_type VARCHAR(20) DEFAULT NULL,  -- 'config' | 'proxy' | 'both'
+                    status VARCHAR(20) DEFAULT 'pending',  -- 'pending' | 'approved' | 'rejected'
+                    requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    decided_at TIMESTAMP,
+                    decided_by BIGINT,
+                    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+                )
+            """)
+
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_subscriptions_user_id ON subscriptions(user_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_subscriptions_status ON subscriptions(status)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_transactions_user_id ON transactions(user_id)")
@@ -618,6 +641,42 @@ class Database:
             if cursor:
                 cursor.close()
 
+    def has_emergency_subscription(self, user_id: int, panel_id: str) -> bool:
+        """آیا کاربر قبلاً از این پنل اشتراک اضطراری گرفته است؟"""
+        cursor = None
+        try:
+            cursor = self.get_cursor()
+            cursor.execute(
+                "SELECT 1 FROM subscriptions WHERE user_id = %s AND panel_id = %s "
+                "AND plan_type = 'emergency' LIMIT 1",
+                (user_id, panel_id)
+            )
+            return cursor.fetchone() is not None
+        except Exception as e:
+            logger.error(f"Error checking emergency subscription: {e}")
+            return False
+        finally:
+            if cursor:
+                cursor.close()
+
+    def get_emergency_panel_ids(self, user_id: int):
+        """لیست panel_id هایی که کاربر قبلاً از آن‌ها اشتراک اضطراری گرفته"""
+        cursor = None
+        try:
+            cursor = self.get_cursor()
+            cursor.execute(
+                "SELECT panel_id FROM subscriptions WHERE user_id = %s AND plan_type = 'emergency'",
+                (user_id,)
+            )
+            rows = cursor.fetchall()
+            return {row['panel_id'] for row in rows if row.get('panel_id')}
+        except Exception as e:
+            logger.error(f"Error getting emergency panel ids: {e}")
+            return set()
+        finally:
+            if cursor:
+                cursor.close()
+            
     # ============ Admin: Delete User / Reset Balance ============
     def delete_user(self, user_id: int) -> bool:
         """
@@ -662,3 +721,170 @@ class Database:
         finally:
             if cursor:
                 cursor.close()
+
+    def get_emergency_access(self, user_id: int):
+        cursor = None
+        try:
+            cursor = self.get_cursor()
+            cursor.execute("SELECT * FROM emergency_access WHERE user_id = %s", (user_id,))
+            return cursor.fetchone()
+        except Exception as e:
+            logger.error(f"Error getting emergency access: {e}")
+            return None
+        finally:
+            if cursor:
+                cursor.close()
+
+    def request_emergency_access(self, user_id: int) -> bool:
+        cursor = None
+        try:
+            cursor = self.get_cursor()
+            cursor.execute("""
+                INSERT INTO emergency_access (user_id, status, requested_at)
+                VALUES (%s, 'pending', NOW())
+                ON CONFLICT (user_id) DO UPDATE SET
+                    status = 'pending', requested_at = NOW(), decided_at = NULL, decided_by = NULL
+            """, (user_id,))
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Error requesting emergency access: {e}")
+            if self.conn:
+                self.conn.rollback()
+            return False
+        finally:
+            if cursor:
+                cursor.close()
+
+    def set_emergency_access(self, user_id: int, access_type: str, admin_id: int = None) -> bool:
+        cursor = None
+        try:
+            cursor = self.get_cursor()
+            cursor.execute("""
+                INSERT INTO emergency_access (user_id, access_type, status, decided_at, decided_by)
+                VALUES (%s, %s, 'approved', NOW(), %s)
+                ON CONFLICT (user_id) DO UPDATE SET
+                    access_type = %s, status = 'approved', decided_at = NOW(), decided_by = %s
+            """, (user_id, access_type, admin_id, access_type, admin_id))
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Error setting emergency access: {e}")
+            if self.conn:
+                self.conn.rollback()
+            return False
+        finally:
+            if cursor:
+                cursor.close()
+
+    def reject_emergency_access(self, user_id: int, admin_id: int = None) -> bool:
+        cursor = None
+        try:
+            cursor = self.get_cursor()
+            cursor.execute("""
+                UPDATE emergency_access
+                SET status = 'rejected', decided_at = NOW(), decided_by = %s
+                WHERE user_id = %s
+            """, (admin_id, user_id))
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Error rejecting emergency access: {e}")
+            if self.conn:
+                self.conn.rollback()
+            return False
+        finally:
+            if cursor:
+                cursor.close()
+
+    def remove_emergency_access(self, user_id: int) -> bool:
+        cursor = None
+        try:
+            cursor = self.get_cursor()
+            cursor.execute("DELETE FROM emergency_access WHERE user_id = %s", (user_id,))
+            deleted = cursor.rowcount > 0
+            self.conn.commit()
+            return deleted
+        except Exception as e:
+            logger.error(f"Error removing emergency access: {e}")
+            if self.conn:
+                self.conn.rollback()
+            return False
+        finally:
+            if cursor:
+                cursor.close()
+
+    def list_emergency_access(self, status: str = 'approved'):
+        cursor = None
+        try:
+            cursor = self.get_cursor()
+            cursor.execute(
+                "SELECT ea.*, u.username, u.first_name FROM emergency_access ea "
+                "LEFT JOIN users u ON u.user_id = ea.user_id "
+                "WHERE ea.status = %s ORDER BY ea.decided_at DESC NULLS LAST, ea.requested_at DESC",
+                (status,)
+            )
+            return cursor.fetchall()
+        except Exception as e:
+            logger.error(f"Error listing emergency access: {e}")
+            return []
+        finally:
+            if cursor:
+                cursor.close()
+
+    # ============ Sub Token Methods ============
+    def get_or_create_sub_token(self, user_id: int):
+        """توکن یکتای «اشتراک یکپارچه» کاربر را برمی‌گرداند؛ اگر نداشت می‌سازد"""
+        cursor = None
+        try:
+            cursor = self.get_cursor()
+            cursor.execute("SELECT sub_token FROM users WHERE user_id = %s", (user_id,))
+            row = cursor.fetchone()
+            if row and row.get('sub_token'):
+                return row['sub_token']
+
+            token = secrets.token_hex(16)  # ۳۲ کاراکتر hex
+            cursor.execute("UPDATE users SET sub_token = %s WHERE user_id = %s", (token, user_id))
+            self.conn.commit()
+            return token
+        except Exception as e:
+            logger.error(f"Error getting/creating sub_token: {e}")
+            if self.conn:
+                self.conn.rollback()
+            return None
+        finally:
+            if cursor:
+                cursor.close()
+
+    def get_user_id_by_sub_token(self, token: str):
+        """پیدا کردن user_id از روی توکن اشتراک یکپارچه"""
+        cursor = None
+        try:
+            cursor = self.get_cursor()
+            cursor.execute("SELECT user_id FROM users WHERE sub_token = %s", (token,))
+            row = cursor.fetchone()
+            return row['user_id'] if row else None
+        except Exception as e:
+            logger.error(f"Error getting user by sub_token: {e}")
+            return None
+        finally:
+            if cursor:
+                cursor.close()
+
+    def reset_sub_token(self, user_id: int):
+        """در صورت لو رفتن لینک، توکن قبلی را باطل و توکن جدید می‌سازد"""
+        cursor = None
+        try:
+            cursor = self.get_cursor()
+            token = secrets.token_hex(16)
+            cursor.execute("UPDATE users SET sub_token = %s WHERE user_id = %s", (token, user_id))
+            self.conn.commit()
+            return token
+        except Exception as e:
+            logger.error(f"Error resetting sub_token: {e}")
+            if self.conn:
+                self.conn.rollback()
+            return None
+        finally:
+            if cursor:
+                cursor.close()                
