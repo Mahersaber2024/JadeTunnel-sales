@@ -48,32 +48,6 @@
 
 `index.php` روی هاست ایران (خارج از این ریپو، جدا آپلود می‌شود) درخواست کلاینت‌های VPN/مرورگر را به `sub_api.py` روی سرور اصلی پراکسی می‌کند تا از فیلترینگ داخل ایران عبور کند.
 
----
-
-## ساختار فایل‌ها
-
-| فایل | نقش |
-|---|---|
-| `main.py` | نقطه‌ی ورود ربات؛ ثبت تمام Handlerها و ConversationHandlerها |
-| `handlers.py` | منطق اصلی کاربر: خرید VPN، شارژ کیف‌پول، افزایش حجم، مشاهده‌ی اشتراک‌ها، طرح اضطراری، تایید/رد پرداخت توسط ادمین |
-| `admin.py` | پنل مدیریت: افزودن موجودی، مدیریت پنل‌ها، تنظیمات کانال/پشتیبانی/پاداش/کمیسیون/پرداخت ترکیبی، مدیریت طرح اضطراری |
-| `send_gift.py` | فلوی ارسال هدیه‌ی موجودی بین کاربران (انتخاب مخاطب از طریق `KeyboardButtonRequestUsers`) |
-| `logger_bot.py` | ارسال لاگ‌های عملیاتی به تاپیک‌های یک گروه تلگرامی |
-| `database.py` | لایه‌ی دیتابیس PostgreSQL — ساخت جدول‌ها/مهاجرت ستون‌ها هنگام اجرا و تمام متدهای CRUD |
-| `client_manager.py` | کلاینت HTTP برای API پنل 3x-UI (لاگین با CSRF، ساخت/حذف کلاینت، دریافت لینک، آپدیت حجم) |
-| `panel_manager.py` | مدیریت چند پنل هم‌زمان؛ ذخیره در `config/panels.json`؛ انتخاب پنل بر اساس نوع طرح و ظرفیت |
-| `proxy_manager.py` | لیست پروکسی‌های عمومی (`config/proxies.json`) — جدا از `emergency_proxies.json` در `bot_settings.py` |
-| `bot_settings.py` | تنظیمات قابل‌تغییر از داخل ربات؛ در `bot_settings.json` ذخیره می‌شود |
-| `config.py` | خواندن/نوشتن `config.json` (توکن بات، اطلاعات دیتابیس، آیدی ادمین‌ها، گروه لاگ) |
-| `setup_db.py` | ساخت اولیه‌ی جدول‌های PostgreSQL از خط فرمان (مستقل از کلاس `Database`) |
-| `sub_api.py` | وب‌سرویس aiohttp؛ اندپوینت‌های `/sub/{token}`، `/api/raw/{token}`، `/api/info/{token}`، `/health` |
-| `install.sh` | نصب‌گر تعاملی کامل (وابستگی‌ها، دیتابیس، کلون، venv، ساخت جدول‌ها، دو سرویس systemd، تولید `index.php`) |
-| `uninstall.sh` | حذف‌کننده‌ی مستقل — **قدیمی، فقط سرویس `sell-bot` را می‌شناسد** (نگاه کنید به بخش مشکلات) |
-| `requirements.txt` | وابستگی‌های پایتون — **کامل نیست**، `aiohttp` کم دارد (نگاه کنید به بخش مشکلات) |
-| `LICENSE` | MIT License، © 2026 Mahersaber2024 |
-
----
-
 ## مدل داده (`database.py`)
 
 کلاس `Database` در سازنده‌ی خودش (`__init__` → `connect()` → `_create_tables()` → `_add_missing_columns()`) هم جدول‌ها را در صورت نبود می‌سازد و هم ستون‌های جدید را روی نصب‌های قدیمی‌تر Migrate می‌کند — یعنی نیازی نیست هر بار `setup_db.py` را جداگانه اجرا کنید؛ اولین بار که ربات یا `sub-api` بالا بیاید این کار خودکار انجام می‌شود.
@@ -126,28 +100,6 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Mahersaber2024/JadeTunnel-sa
 بعد از نصب، `index.php` تولیدشده را روی هاست ایران در مسیری که مشخص کردید آپلود کنید تا لینک اشتراک یکپارچه کار کند.
 
 ---
-
-## تنظیمات
-
-### `config.json` (حساس — دسترسی 600)
-```json
-{
-  "bot_token": "...",
-  "db_host": "localhost",
-  "db_port": 5432,
-  "db_name": "jadetunnel_base",
-  "db_user": "cbu_user",
-  "db_password": "...",
-  "admin_ids": [123456789],
-  "LOG_GROUP_ID": -1001234567890
-}
-```
-
-### `bot_settings.json` (قابل‌تغییر از داخل پنل ادمین)
-کانال اسپانسر، متن پشتیبانی، مبلغ پاداش ثبت‌نام/دعوت، پنل کمیسیونی اختصاصی، وضعیت پرداخت ترکیبی، اطلاعات کارت بانکی، و `combined_sub_base_url`.
-
-### `config/panels.json` (توسط `panel_manager.py` مدیریت می‌شود)
-هر پنل شامل: `panel_base`, `username`, `password`, `inbound_ids`, `max_subscriptions`, `plan_types` (`new`/`old`/`custom_charge`/`emergency`), `enabled`, `is_default`.
 
 ---
 
