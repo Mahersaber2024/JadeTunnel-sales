@@ -25,7 +25,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Mahersaber2024/JadeTunnel-sa
 
 بعد از نصب، `index.php` تولیدشده را روی هاست ایران در مسیری که مشخص کردید آپلود کنید تا لینک اشتراک یکپارچه کار کند.
 
----
+
 ## Uninstallation
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/Mahersaber2024/JadeTunnel-sales/main/install.sh)
