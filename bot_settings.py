@@ -2,6 +2,13 @@ import json
 import os
 import logging
 
+# ============ Emergency Proxy Links (self-contained storage) ============
+import json as _json
+import os as _os
+
+_EMERGENCY_PROXY_FILE = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "emergency_proxies.json")
+
+
 logger = logging.getLogger(__name__)
 
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot_settings.json")
@@ -20,6 +27,7 @@ DEFAULT_SETTINGS = {
     "card_number": "6219861065685272",
     "card_holder": "وحید صابر",
     "card_bank": "سامان",
+    "combined_sub_base_url": "https://heysolo.ir",
 }
 
 _settings_cache = None
@@ -221,3 +229,58 @@ def set_card_bank(value: str):
     data = _load()
     data["card_bank"] = value.strip()
     _save(data)
+
+# ====================== Combined Sub URL ======================
+
+_COMBINED_SUB_BASE_URL = None
+
+def set_combined_sub_base_url(url: str):
+    """تنظیم آدرس پایه برای لینک اشتراک یکپارچه"""
+    global _COMBINED_SUB_BASE_URL
+    _COMBINED_SUB_BASE_URL = url.rstrip('/')
+    # ذخیره در settings
+    data = _load()
+    data["combined_sub_base_url"] = _COMBINED_SUB_BASE_URL
+    _save(data)
+
+
+def get_combined_sub_base_url() -> str:
+    """دریافت آدرس پایه برای لینک اشتراک یکپارچه"""
+    global _COMBINED_SUB_BASE_URL
+    if _COMBINED_SUB_BASE_URL:
+        return _COMBINED_SUB_BASE_URL
+    
+    # بارگذاری از settings
+    data = _load()
+    url = data.get("combined_sub_base_url")
+    if url:
+        _COMBINED_SUB_BASE_URL = url.rstrip('/')
+        return _COMBINED_SUB_BASE_URL
+    
+    # مقدار پیش‌فرض (هاست ایران)
+    default_url = "https://heysolo.ir"
+    _COMBINED_SUB_BASE_URL = default_url
+    return default_url
+
+def get_emergency_proxy_links() -> list:
+    """
+    لیست پروکسی‌های اضطراری را برمی‌گرداند.
+    هر آیتم: {'name': 'Proxy🇧🇬', 'link': 'tg://proxy?server=...'}
+    """
+    if not _os.path.exists(_EMERGENCY_PROXY_FILE):
+        return []
+    try:
+        with open(_EMERGENCY_PROXY_FILE, "r", encoding="utf-8") as f:
+            return _json.load(f)
+    except Exception:
+        return []
+
+
+def set_emergency_proxy_links(links: list):
+    """لیست پروکسی‌های اضطراری را ذخیره می‌کند"""
+    try:
+        with open(_EMERGENCY_PROXY_FILE, "w", encoding="utf-8") as f:
+            _json.dump(links, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(f"Error saving emergency proxies: {e}")
