@@ -1,5 +1,5 @@
-python-telegram-bot
-psycopg2-binary
-python-dotenv
-requests
-httpx
+cd /opt/sell-bot
+source venv/bin/activate
+pip install aiohttp
+deactivate
+sudo systemctl restart sub-api
