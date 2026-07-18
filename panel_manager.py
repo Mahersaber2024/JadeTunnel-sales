@@ -144,48 +144,35 @@ class PanelManager:
         """
         Get the best panel to use for a new subscription based on plan type.
         Returns (panel_data, panel_id)
-    
+
         Args:
-            plan_type: نوع طرح ('new', 'old', 'custom_charge')
+            plan_type: نوع طرح ('new', 'old', 'custom_charge', 'emergency', ...)
         """
         if not self.panels:
             return None, None
-    
+
         # Get all active panels (not disabled)
         active_panels = {
             pid: p for pid, p in self.panels.items()
             if p.get('enabled', True)
         }
-    
+
         if not active_panels:
             return None, None
-    
-        # اول پنلی که دقیقاً این plan_type را پشتیبانی می‌کند
+
+        # فقط پنلی که دقیقاً این plan_type را پشتیبانی می‌کند و ظرفیت خالی دارد
+        # توجه: هیچ fallback ای که plan_type را نادیده بگیرد وجود ندارد،
+        # چون باعث می‌شد پلن‌ها به‌اشتباه روی پنل‌های نامرتبط
+        # (مثلاً پنل اختصاصی Emergency) ساخته شوند.
         for panel_id, panel in active_panels.items():
             plan_types = panel.get('plan_types', ['new', 'old', 'custom_charge'])
             usage = self.panel_usage.get(panel_id, 0)
             max_subs = panel.get('max_subscriptions', 100)
-        
+
             if plan_type in plan_types and usage < max_subs:
                 return panel, panel_id
-    
-        # اگر پنل دقیقاً پشتیبانی نکرد، پنلی که همه طرح‌ها را پشتیبانی می‌کند
-        for panel_id, panel in active_panels.items():
-            plan_types = panel.get('plan_types', ['new', 'old', 'custom_charge'])
-            usage = self.panel_usage.get(panel_id, 0)
-            max_subs = panel.get('max_subscriptions', 100)
-        
-            if len(plan_types) == 3 and usage < max_subs:
-                return panel, panel_id
-    
-        # آخرین راه: هر پنل فعال با ظرفیت خالی
-        for panel_id, panel in active_panels.items():
-            usage = self.panel_usage.get(panel_id, 0)
-            max_subs = panel.get('max_subscriptions', 100)
-            if usage < max_subs:
-                return panel, panel_id
-    
-        # If all panels are full, return None
+
+        # هیچ پنل فعالی این plan_type را پشتیبانی نمی‌کند یا همه پر هستند
         return None, None
     
     def increment_usage(self, panel_id: str):
