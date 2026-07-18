@@ -5,7 +5,7 @@
 // ============================================================
 
 // ---- Configuration ----
-const API_BASE = 'https://pio.heysolo.ir:2053';  // Use your domain with SSL
+const API_BASE = '';  // Use your domain with SSL
 const API_KEY  = '';                              // Put your API key here if configured
 
 const SPONSOR_HTML = '
@@ -27,7 +27,7 @@ function fetch_api(string $path) {
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
     curl_setopt($ch, CURLOPT_TIMEOUT, 20);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);  // For Iran hosts that may not have proper SSL
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);  // For Iran hosts that mayhplr hplr hplr  not have proper SSL
     curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
     curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
 
