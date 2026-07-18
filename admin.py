@@ -33,6 +33,10 @@ ADMIN_RESET_BALANCE_CONFIRM = 14
 ADMIN_BONUS_INPUT = 15
 ADMIN_COMMISSION_PERCENT_INPUT = 16  
 ADMIN_CARD_INFO_INPUT = 17
+ADMIN_EMERGENCY_PROXY_NAME_INPUT = 18
+ADMIN_EMERGENCY_PROXY_LINK_INPUT = 19
+ADMIN_EMERGENCY_ADD_USER_ID = 20
+ADMIN_EMERGENCY_DENY_REASON = 21
 
 from bot_settings import (
     get_sponsor_channel,
@@ -124,8 +128,8 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📢 Sponsor Channel Settings", callback_data="admin_channel_settings")],
         [InlineKeyboardButton("☎️ Support Address Settings", callback_data="admin_support_settings")],
         [InlineKeyboardButton("🎁 Gift & Bonus Settings", callback_data="admin_bonus_settings")],
-        [InlineKeyboardButton("💳 Payment Settings", callback_data="admin_payment_settings")],
-        [InlineKeyboardButton("🚨 مدیریت طرح اضطراری", callback_data="emg_admin_menu")],   # ← خط جدید
+        [InlineKeyboardButton("💳 Payment Settings", callback_data="admin_payment_settings")],   # <-- جدید
+        [InlineKeyboardButton("🆘 Emergency Management", callback_data="admin_emergency_settings")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -141,10 +145,11 @@ def _admin_main_menu_keyboard():
         [InlineKeyboardButton("📢 Sponsor Channel Settings", callback_data="admin_channel_settings")],
         [InlineKeyboardButton("☎️ Support Address Settings", callback_data="admin_support_settings")],
         [InlineKeyboardButton("🎁 Gift & Bonus Settings", callback_data="admin_bonus_settings")],
-        [InlineKeyboardButton("💳 Payment Settings", callback_data="admin_payment_settings")],
-        [InlineKeyboardButton("🚨 مدیریت طرح اضطراری", callback_data="emg_admin_menu")],   # ← خط جدید
+        [InlineKeyboardButton("💳 Payment Settings", callback_data="admin_payment_settings")],   # <-- جدید
+        [InlineKeyboardButton("🆘 Emergency Management", callback_data="admin_emergency_settings")],
     ]
     return InlineKeyboardMarkup(keyboard)
+
 
 async def admin_back_to_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Back to the top-level admin panel (from a submenu, via callback)"""
@@ -498,6 +503,8 @@ async def admin_manage_panels(update: Update, context: ContextTypes.DEFAULT_TYPE
             plan_icons.append('📦')
         if 'custom_charge' in plan_types:
             plan_icons.append('🔥')
+        if 'emergency' in plan_types:      # <-- جدید
+            plan_icons.append('🆘')
         plan_display = ''.join(plan_icons) if plan_icons else '📌'
 
         keyboard.append([
@@ -521,9 +528,9 @@ async def admin_manage_panels(update: Update, context: ContextTypes.DEFAULT_TYPE
         "⭐️ = Default panel\n"
         "✅ = Enabled | ❌ = Disabled\n"
         "(usage/limit)\n"
-        "🆕 = New plan | 📦 = Old plan | 🔥 = Custom charge plan",
+        "🆕 = New plan | 📦 = Old plan | 🔥 = Custom charge plan | 🆘 = Emergency plan",  # <-- اصلاح شد
         reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode=None  # Changed from Markdown to None
+        parse_mode=None
     )
 
 async def admin_panel_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -549,7 +556,8 @@ async def admin_panel_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     plan_names = {
         'new': '🆕 New Plan (Unlimited)',
         'old': '📦 Old Plan (Single User)',
-        'custom_charge': '🔥 Custom Charge Plan'
+        'custom_charge': '🔥 Custom Charge Plan',
+        'emergency': '🆘 Emergency Plan',
     }
     plan_display = '\n'.join([plan_names.get(p, p) for p in plan_types]) if plan_types else 'All plans'
 
@@ -617,17 +625,16 @@ async def admin_panel_edit_plans_start(update: Update, context: ContextTypes.DEF
     context.user_data['admin_edit_plans_panel_id'] = panel_id
     current_plans = panel.get('plan_types', ['new', 'old', 'custom_charge'])
 
-    # ============ تصحیح: تبدیل 'custom' به 'custom_charge' ============
     if 'custom' in current_plans and 'custom_charge' not in current_plans:
         current_plans.remove('custom')
         current_plans.append('custom_charge')
         panel_manager.update_panel(panel_id, plan_types=current_plans)
 
-    # Current status
     plan_names = {
         'new': '🆕 New Plan (Unlimited)',
         'old': '📦 Old Plan (Single User)',
-        'custom_charge': '🔥 Custom Charge Plan'
+        'custom_charge': '🔥 Custom Charge Plan',
+        'emergency': '🆘 Emergency Plan',   # <-- جدید
     }
     current_display = '\n'.join([f"✅ {plan_names.get(p, p)}" for p in current_plans])
     if not current_plans:
@@ -646,6 +653,12 @@ async def admin_panel_edit_plans_start(update: Update, context: ContextTypes.DEF
             InlineKeyboardButton(
                 f"{'✅' if 'custom_charge' in current_plans else '⬜'} Custom Charge",
                 callback_data=f"panel_toggle_plan_custom_{panel_id}"
+            )
+        ],
+        [
+            InlineKeyboardButton(  # <-- جدید
+                f"{'✅' if 'emergency' in current_plans else '⬜'} 🆘 Emergency Plan",
+                callback_data=f"panel_toggle_plan_emergency_{panel_id}"
             )
         ],
         [InlineKeyboardButton("💾 Save Changes", callback_data=f"panel_save_plans_{panel_id}")],
@@ -672,8 +685,7 @@ async def admin_panel_toggle_plan(update: Update, context: ContextTypes.DEFAULT_
         return
 
     data = query.data
-    
-    # استخراج اطلاعات از callback_data
+
     if data.startswith("panel_toggle_plan_new_"):
         panel_id = data.replace("panel_toggle_plan_new_", "")
         plan_type = 'new'
@@ -683,6 +695,9 @@ async def admin_panel_toggle_plan(update: Update, context: ContextTypes.DEFAULT_
     elif data.startswith("panel_toggle_plan_custom_"):
         panel_id = data.replace("panel_toggle_plan_custom_", "")
         plan_type = 'custom_charge'
+    elif data.startswith("panel_toggle_plan_emergency_"):
+        panel_id = data.replace("panel_toggle_plan_emergency_", "")
+        plan_type = 'emergency'
     else:
         await query.answer("❌ فرمت داده نامعتبر!", show_alert=True)
         return
@@ -694,7 +709,6 @@ async def admin_panel_toggle_plan(update: Update, context: ContextTypes.DEFAULT_
         await query.edit_message_text("❌ Panel not found.")
         return
 
-    # Get current plan list from context or panel
     temp_plans = context.user_data.get(f'temp_plans_{panel_id}')
     if temp_plans is None:
         temp_plans = panel.get('plan_types', ['new', 'old', 'custom_charge']).copy()
@@ -702,23 +716,19 @@ async def admin_panel_toggle_plan(update: Update, context: ContextTypes.DEFAULT_
             temp_plans.remove('custom')
             temp_plans.append('custom_charge')
 
-    # Toggle status
+    # Toggle status — دیگر هیچ محدودیتی برای حداقل یک پلن اصلی وجود ندارد
     if plan_type in temp_plans:
-        if len(temp_plans) <= 1:
-            await query.answer("❌ At least one plan must be selected!", show_alert=True)
-            return
         temp_plans.remove(plan_type)
     else:
         temp_plans.append(plan_type)
 
-    # Save in context
     context.user_data[f'temp_plans_{panel_id}'] = temp_plans
 
-    # Re-render the page with the new status
     plan_names = {
         'new': '🆕 New Plan (Unlimited)',
         'old': '📦 Old Plan (Single User)',
-        'custom_charge': '🔥 Custom Charge Plan'
+        'custom_charge': '🔥 Custom Charge Plan',
+        'emergency': '🆘 Emergency Plan',
     }
     current_display = '\n'.join([f"✅ {plan_names.get(p, p)}" for p in temp_plans])
     if not temp_plans:
@@ -739,6 +749,12 @@ async def admin_panel_toggle_plan(update: Update, context: ContextTypes.DEFAULT_
                 callback_data=f"panel_toggle_plan_custom_{panel_id}"
             )
         ],
+        [
+            InlineKeyboardButton(
+                f"{'✅' if 'emergency' in temp_plans else '⬜'} 🆘 Emergency Plan",
+                callback_data=f"panel_toggle_plan_emergency_{panel_id}"
+            )
+        ],
         [InlineKeyboardButton("💾 Save Changes", callback_data=f"panel_save_plans_{panel_id}")],
         [InlineKeyboardButton("🔙 Back", callback_data=f"panel_info_{panel_id}")]
     ]
@@ -755,7 +771,6 @@ async def admin_panel_toggle_plan(update: Update, context: ContextTypes.DEFAULT_
     return ADMIN_PANEL_EDIT_PLANS
 
 async def admin_panel_save_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Save the plan types changes to the panel"""
     query = update.callback_query
     await query.answer()
 
@@ -777,42 +792,35 @@ async def admin_panel_save_plans(update: Update, context: ContextTypes.DEFAULT_T
             temp_plans.remove('custom')
             temp_plans.append('custom_charge')
 
-    if not temp_plans:
-        await query.answer("❌ At least one plan must be selected!", show_alert=True)
-        return
-
-    # Save to panel
     old_plans = panel.get('plan_types', [])
     success = panel_manager.update_panel(panel_id, plan_types=temp_plans)
 
     if success:
-        # Clear temp data
         context.user_data.pop(f'temp_plans_{panel_id}', None)
 
         plan_names = {
             'new': '🆕 New Plan (Unlimited)',
             'old': '📦 Old Plan (Single User)',
-            'custom_charge': '🔥 Custom Charge Plan'
+            'custom_charge': '🔥 Custom Charge Plan',
+            'emergency': '🆘 Emergency Plan',  # <-- جدید
         }
         saved_display = '\n'.join([f"✅ {plan_names.get(p, p)}" for p in temp_plans])
 
-        # ============ لاگ تغییرات طرح‌های پنل ============
         try:
             from logger_bot import log_admin_action
             admin = query.from_user
-            
-            # تغییرات را مشخص کن
+
             changes = []
-            for plan in ['new', 'old', 'custom_charge']:
+            for plan in ['new', 'old', 'custom_charge', 'emergency']:  # <-- اضافه شد emergency
                 was_in_old = plan in old_plans
                 is_in_new = plan in temp_plans
                 if was_in_old and not is_in_new:
                     changes.append(f"❌ حذف {plan_names.get(plan, plan)}")
                 elif not was_in_old and is_in_new:
                     changes.append(f"✅ اضافه {plan_names.get(plan, plan)}")
-            
+
             change_text = "\n".join(changes) if changes else "بدون تغییر"
-            
+
             await log_admin_action(
                 context.bot,
                 admin_id=admin.id,
@@ -1386,18 +1394,12 @@ async def admin_panel_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     status = "✅" if success else "❌"
-
-    keyboard = [
-        [InlineKeyboardButton("🔙 Back", callback_data=f"panel_info_{panel_id}")]
-    ]
-
     await query.edit_message_text(
         f"{status} Connection Test Result\n\n"
         f"📛 Panel: {panel.get('name')}\n"
         f"🌐 Address: {panel.get('panel_base')}\n"
         f"📊 Result: {msg}",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode=None
+        parse_mode=None  # Changed from Markdown to None
     )
 
 # ============ Admin Support Address Settings ============
@@ -2277,5 +2279,476 @@ async def admin_card_info_edit_input(update: Update, context: ContextTypes.DEFAU
         f"👤 New card holder: {new_holder}\n"
         f"🏦 New bank: {new_bank}",
         reply_markup=get_main_menu()
+    )
+    return ConversationHandler.END
+
+def _emergency_proxy_text_and_keyboard():
+    from bot_settings import get_emergency_proxy_links
+    proxies = get_emergency_proxy_links()
+
+    if proxies:
+        lines = [f"{i+1}. {p.get('name', 'Unnamed')}" for i, p in enumerate(proxies)]
+        current = "\n".join(lines)
+    else:
+        current = "❌ No proxy registered."
+
+    text = (
+        f"🌐 Proxy Management\n\n"   # قبلاً: "🌐 Emergency Proxy Management"
+        f"Current proxies:\n{current}\n\n"
+        f"Click the button below to delete each one."
+    )
+
+    keyboard = []
+    for i, p in enumerate(proxies):
+        keyboard.append([
+            InlineKeyboardButton(
+                f"🗑 Delete #{i+1} - {p.get('name', f'Proxy {i+1}')}", 
+                callback_data=f"admin_emergency_proxy_del_{i}"
+            )
+        ])
+    keyboard.append([InlineKeyboardButton("➕ Add New Proxy", callback_data="admin_emergency_proxy_add")])
+    keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="admin_emergency_settings")])
+
+    return text, InlineKeyboardMarkup(keyboard)
+
+
+async def admin_emergency_proxy_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id):
+        await query.edit_message_text("⛔️ You do not have admin access.")
+        return
+    text, reply_markup = _emergency_proxy_text_and_keyboard()
+    await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=None)
+
+
+async def admin_emergency_proxy_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Delete a proxy from the list"""
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id):
+        return
+
+    from bot_settings import get_emergency_proxy_links, set_emergency_proxy_links
+    idx = int(query.data.replace("admin_emergency_proxy_del_", ""))
+    proxies = get_emergency_proxy_links()
+
+    if idx >= len(proxies):
+        await query.answer("❌ This proxy no longer exists.", show_alert=True)
+    else:
+        removed = proxies.pop(idx)
+        set_emergency_proxy_links(proxies)
+
+        try:
+            from logger_bot import log_admin_action
+            admin = query.from_user
+            await log_admin_action(
+                context.bot,
+                admin_id=admin.id,
+                action="Delete Emergency Proxy",
+                target_user_id=None,
+                details=f"Removed proxy: {removed.get('name', '')}",
+                username=admin.username,
+                first_name=admin.first_name,
+                last_name=admin.last_name
+            )
+        except Exception as e:
+            logger.error(f"Error logging admin action: {e}")
+
+        await query.answer("✅ Deleted successfully.")
+
+    text, reply_markup = _emergency_proxy_text_and_keyboard()
+    await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=None)
+
+
+async def admin_emergency_proxy_add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start the process of adding a proxy - Step 1: Get display name"""
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id):
+        await query.edit_message_text("⛔️ You do not have admin access.")
+        return ConversationHandler.END
+
+    await query.edit_message_text(
+        "➕ Add New Proxy\n\n"
+        "Please enter the display name for the proxy:\n"
+        "Example: Proxy🇧🇬\n\n"
+        "⚠️ Send /cancel to abort.",
+        parse_mode=None
+    )
+    return ADMIN_EMERGENCY_PROXY_NAME_INPUT
+
+
+async def admin_emergency_proxy_name_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Receive display name, then ask for link"""
+    text = update.message.text.strip()
+    if text == "/cancel":
+        await update.message.reply_text("❌ Operation cancelled.", reply_markup=get_main_menu())
+        return ConversationHandler.END
+
+    if not text:
+        await update.message.reply_text(
+            "❌ Name cannot be empty. Please enter it again:\n\n⚠️ Send /cancel to abort."
+        )
+        return ADMIN_EMERGENCY_PROXY_NAME_INPUT
+
+    context.user_data['admin_new_proxy_name'] = text
+
+    await update.message.reply_text(
+        f"✅ Name saved: {text}\n\n"
+        f"Now please enter the proxy link:\n"
+        f"Example:\n"
+        f"tg://proxy?server=45.137.201.233&port=808&secret=...\n\n"
+        f"⚠️ Send /cancel to abort.",
+        parse_mode=None
+    )
+    return ADMIN_EMERGENCY_PROXY_LINK_INPUT
+
+
+async def admin_emergency_proxy_link_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Receive link and save the proxy"""
+    text = update.message.text.strip()
+    if text == "/cancel":
+        context.user_data.pop('admin_new_proxy_name', None)
+        await update.message.reply_text("❌ Operation cancelled.", reply_markup=get_main_menu())
+        return ConversationHandler.END
+
+    if not text:
+        await update.message.reply_text(
+            "❌ Link cannot be empty. Please enter it again:\n\n⚠️ Send /cancel to abort."
+        )
+        return ADMIN_EMERGENCY_PROXY_LINK_INPUT
+
+    name = context.user_data.get('admin_new_proxy_name', 'Proxy')
+
+    from bot_settings import get_emergency_proxy_links, set_emergency_proxy_links
+    proxies = get_emergency_proxy_links()
+    proxies.append({'name': name, 'link': text})
+    set_emergency_proxy_links(proxies)
+
+    try:
+        from logger_bot import log_admin_action
+        admin = update.effective_user
+        await log_admin_action(
+            context.bot,
+            admin_id=admin.id,
+            action="Add Emergency Proxy",
+            target_user_id=None,
+            details=f"Name: {name}\nLink: {text}",
+            username=admin.username,
+            first_name=admin.first_name,
+            last_name=admin.last_name
+        )
+    except Exception as e:
+        logger.error(f"Error logging admin action: {e}")
+
+    context.user_data.pop('admin_new_proxy_name', None)
+
+    await update.message.reply_text(
+        f"✅ Proxy «{name}» added successfully!",
+        reply_markup=get_main_menu()
+    )
+    return ConversationHandler.END
+
+def _emergency_settings_text_and_keyboard():
+    pending_count = len(db.list_emergency_access('pending'))
+    approved_count = len(db.list_emergency_access('approved'))
+    text = (
+        f"🆘 Emergency Plan Management\n\n"
+        f"⏳ Pending requests: {pending_count}\n"
+        f"✅ Users with access: {approved_count}"
+    )
+    keyboard = [
+        [InlineKeyboardButton("🌐 Proxy Management", callback_data="admin_emergency_proxy_settings")],
+        [InlineKeyboardButton(f"⏳ Pending Requests ({pending_count})", callback_data="admin_emergency_pending")],
+        [InlineKeyboardButton("👥 User Access Management", callback_data="admin_emergency_users_menu")],
+        [InlineKeyboardButton("🔙 Back", callback_data="admin_back_to_main_menu")]
+    ]
+    return text, InlineKeyboardMarkup(keyboard)
+
+
+async def admin_emergency_settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id):
+        await query.edit_message_text("⛔️ You do not have admin access.")
+        return
+    text, reply_markup = _emergency_settings_text_and_keyboard()
+    await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=None)
+
+
+async def admin_emergency_pending_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id):
+        return
+
+    pending = db.list_emergency_access('pending')
+    if not pending:
+        await query.edit_message_text(
+            "✅ No pending requests.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="admin_emergency_settings")]])
+        )
+        return
+
+    keyboard = []
+    for row in pending:
+        name = row.get('first_name') or row.get('username') or str(row['user_id'])
+        keyboard.append([InlineKeyboardButton(f"👤 {name} ({row['user_id']})", callback_data=f"admin_emergency_review_{row['user_id']}")])
+    keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="admin_emergency_settings")])
+
+    await query.edit_message_text(
+        f"⏳ {len(pending)} pending request(s):",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode=None
+    )
+
+
+async def admin_emergency_review_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id):
+        return
+
+    target_user_id = int(query.data.replace("admin_emergency_review_", ""))
+    user = db.get_user(target_user_id)
+    name = (user.get('first_name') or user.get('username') or str(target_user_id)) if user else str(target_user_id)
+
+    keyboard = [
+        [InlineKeyboardButton("🔧 فقط کانفیگ", callback_data=f"admin_emergency_grant_config_{target_user_id}")],
+        [InlineKeyboardButton("🌐 فقط پروکسی", callback_data=f"admin_emergency_grant_proxy_{target_user_id}")],
+        [InlineKeyboardButton("✅ هردو", callback_data=f"admin_emergency_grant_both_{target_user_id}")],
+        [InlineKeyboardButton("❌ رد کردن", callback_data=f"admin_emergency_deny_{target_user_id}")],
+        [InlineKeyboardButton("🔙 Back", callback_data="admin_emergency_pending")]
+    ]
+    await query.edit_message_text(
+        f"👤 User: {html_lib.escape(str(name))} (`{target_user_id}`)\n\nنوع دسترسی را انتخاب کنید:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode=None
+    )
+
+
+async def admin_emergency_grant(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """کار مشترک برای تایید از هر دو مسیر: هشدار pending و User Access Management"""
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id):
+        return
+
+    data = query.data
+    if data.startswith("admin_emergency_grant_config_"):
+        target_user_id = int(data.replace("admin_emergency_grant_config_", ""))
+        access_type = "config"
+    elif data.startswith("admin_emergency_grant_proxy_"):
+        target_user_id = int(data.replace("admin_emergency_grant_proxy_", ""))
+        access_type = "proxy"
+    else:
+        target_user_id = int(data.replace("admin_emergency_grant_both_", ""))
+        access_type = "both"
+
+    admin = query.from_user
+    db.set_emergency_access(target_user_id, access_type, admin_id=admin.id)
+
+    type_labels = {"config": "🔧 فقط کانفیگ", "proxy": "🌐 فقط پروکسی", "both": "✅ کانفیگ و پروکسی"}
+
+    try:
+        from logger_bot import log_admin_action
+        await log_admin_action(
+            context.bot, admin_id=admin.id, action="تایید دسترسی طرح اضطراری",
+            target_user_id=target_user_id,
+            details=f"نوع دسترسی: {type_labels[access_type]}",
+            username=admin.username, first_name=admin.first_name, last_name=admin.last_name
+        )
+    except Exception as e:
+        logger.error(f"Error logging admin action: {e}")
+
+    try:
+        await context.bot.send_message(
+            chat_id=target_user_id,
+            text=(
+                f"✅ درخواست شما برای طرح اضطراری تایید شد!\n\n"
+                f"📋 نوع دسترسی: {type_labels[access_type]}\n\n"
+                f"اکنون می‌توانید از دکمه 🆘 طرح اضطراری استفاده کنید."
+            )
+        )
+    except Exception as e:
+        logger.error(f"Could not notify user {target_user_id}: {e}")
+
+    await query.edit_message_text(f"✅ Access granted: {type_labels[access_type]} — user {target_user_id}")
+
+async def admin_emergency_deny_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """شروع رد درخواست - دریافت دلیل از ادمین"""
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id):
+        return ConversationHandler.END
+
+    target_user_id = int(query.data.replace("admin_emergency_deny_", ""))
+    context.user_data['admin_emergency_deny_target'] = target_user_id
+
+    await query.message.reply_text(
+        "❌ رد درخواست طرح اضطراری\n\n"
+        "لطفاً دلیل رد کردن را بنویسید (برای کاربر ارسال می‌شود):\n\n"
+        "برای رد بدون ذکر دلیل، فقط علامت - را ارسال کنید.\n"
+        "⚠️ Send /cancel to abort."
+    )
+    return ADMIN_EMERGENCY_DENY_REASON
+
+
+async def admin_emergency_deny_reason_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """دریافت دلیل و اجرای رد درخواست"""
+    text = update.message.text.strip()
+
+    if text == "/cancel":
+        await update.message.reply_text("❌ Operation cancelled.", reply_markup=get_main_menu())
+        context.user_data.pop('admin_emergency_deny_target', None)
+        return ConversationHandler.END
+
+    target_user_id = context.user_data.get('admin_emergency_deny_target')
+    if not target_user_id:
+        await update.message.reply_text("❌ Error! Please try again.", reply_markup=get_main_menu())
+        return ConversationHandler.END
+
+    reason = None if text == "-" else text
+    admin = update.effective_user
+
+    db.reject_emergency_access(target_user_id, admin_id=admin.id)
+
+    try:
+        from logger_bot import log_admin_action
+        await log_admin_action(
+            context.bot, admin_id=admin.id, action="رد درخواست طرح اضطراری",
+            target_user_id=target_user_id,
+            details=f"دلیل رد: {reason}" if reason else "بدون ذکر دلیل",
+            username=admin.username, first_name=admin.first_name, last_name=admin.last_name
+        )
+    except Exception as e:
+        logger.error(f"Error logging admin action: {e}")
+
+    user_message = "❌ درخواست شما برای طرح اضطراری رد شد."
+    if reason:
+        user_message += f"\n\n📝 دلیل: {reason}"
+    user_message += "\nبرای اطلاعات بیشتر با پشتیبانی تماس بگیرید."
+
+    try:
+        await context.bot.send_message(chat_id=target_user_id, text=user_message)
+    except Exception as e:
+        logger.error(f"Could not notify user {target_user_id}: {e}")
+
+    await update.message.reply_text(
+        f"❌ Request denied for user {target_user_id}" + (f"\n📝 دلیل: {reason}" if reason else "")
+    )
+
+    context.user_data.pop('admin_emergency_deny_target', None)
+    return ConversationHandler.END
+
+async def admin_emergency_users_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id):
+        return
+
+    users = db.list_emergency_access('approved')
+    type_icons = {"config": "🔧", "proxy": "🌐", "both": "✅"}
+    keyboard = []
+    for row in users[:50]:
+        name = row.get('first_name') or row.get('username') or str(row['user_id'])
+        icon = type_icons.get(row.get('access_type'), "❔")
+        keyboard.append([InlineKeyboardButton(
+            f"{icon} {name} ({row['user_id']})",
+            callback_data=f"admin_emergency_manage_{row['user_id']}"
+        )])
+    keyboard.append([InlineKeyboardButton("➕ Add User Manually", callback_data="admin_emergency_add_user")])
+    keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="admin_emergency_settings")])
+
+    text = f"👥 {len(users)} user(s) with emergency access." if users else "👥 No users currently have emergency access."
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
+
+
+async def admin_emergency_manage_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id):
+        return
+
+    target_user_id = int(query.data.replace("admin_emergency_manage_", ""))
+    keyboard = [
+        [InlineKeyboardButton("🔧 فقط کانفیگ", callback_data=f"admin_emergency_grant_config_{target_user_id}")],
+        [InlineKeyboardButton("🌐 فقط پروکسی", callback_data=f"admin_emergency_grant_proxy_{target_user_id}")],
+        [InlineKeyboardButton("✅ هردو", callback_data=f"admin_emergency_grant_both_{target_user_id}")],
+        [InlineKeyboardButton("🗑 حذف دسترسی", callback_data=f"admin_emergency_revoke_{target_user_id}")],
+        [InlineKeyboardButton("🔙 Back", callback_data="admin_emergency_users_menu")]
+    ]
+    await query.edit_message_text(
+        f"👤 User: `{target_user_id}`\n\nگزینه مورد نظر را انتخاب کنید:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode=None
+    )
+
+
+async def admin_emergency_revoke(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id):
+        return
+
+    target_user_id = int(query.data.replace("admin_emergency_revoke_", ""))
+    db.remove_emergency_access(target_user_id)
+
+    try:
+        from logger_bot import log_admin_action
+        admin = query.from_user
+        await log_admin_action(
+            context.bot, admin_id=admin.id, action="حذف دسترسی طرح اضطراری",
+            target_user_id=target_user_id, details="",
+            username=admin.username, first_name=admin.first_name, last_name=admin.last_name
+        )
+    except Exception as e:
+        logger.error(f"Error logging admin action: {e}")
+
+    try:
+        await context.bot.send_message(
+            chat_id=target_user_id,
+            text="⚠️ دسترسی شما به طرح اضطراری توسط پشتیبانی حذف شد."
+        )
+    except Exception as e:
+        logger.error(f"Could not notify user {target_user_id}: {e}")
+
+    await admin_emergency_users_menu(update, context)
+
+
+async def admin_emergency_add_user_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id):
+        await query.edit_message_text("⛔️ You do not have admin access.")
+        return ConversationHandler.END
+
+    await query.edit_message_text(
+        "➕ Add User to Emergency Plan\n\nلطفاً آیدی عددی کاربر را ارسال کنید:\n\n⚠️ Send /cancel to abort.",
+        parse_mode=None
+    )
+    return ADMIN_EMERGENCY_ADD_USER_ID
+
+
+async def admin_emergency_add_user_id_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    if text == "/cancel":
+        await update.message.reply_text("❌ Operation cancelled.", reply_markup=get_main_menu())
+        return ConversationHandler.END
+
+    if not text.isdigit():
+        await update.message.reply_text("❌ آیدی باید فقط عدد باشد. دوباره ارسال کنید:\n\n⚠️ Send /cancel to abort.")
+        return ADMIN_EMERGENCY_ADD_USER_ID
+
+    target_user_id = int(text)
+    keyboard = [
+        [InlineKeyboardButton("🔧 فقط کانفیگ", callback_data=f"admin_emergency_grant_config_{target_user_id}")],
+        [InlineKeyboardButton("🌐 فقط پروکسی", callback_data=f"admin_emergency_grant_proxy_{target_user_id}")],
+        [InlineKeyboardButton("✅ هردو", callback_data=f"admin_emergency_grant_both_{target_user_id}")],
+    ]
+    await update.message.reply_text(
+        f"👤 User ID: {target_user_id}\n\nنوع دسترسی را انتخاب کنید:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
     return ConversationHandler.END
