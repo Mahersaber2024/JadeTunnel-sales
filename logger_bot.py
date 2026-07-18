@@ -47,6 +47,7 @@ class Topics:
     PANEL_STATUS = 16  # وضعیت پنل‌ها
     SUBSCRIPTION_EXPIRE = 17  # انقضای اشتراک
     GIFT_SENT = 18  # ارسال هدیه بین کاربران
+    EMERGENCY_PLAN = 19
 
 
 # ============ Topic Names ============
@@ -68,6 +69,7 @@ TOPIC_NAMES = {
     Topics.PANEL_STATUS: "🖥 وضعیت پنل‌ها",
     Topics.SUBSCRIPTION_EXPIRE: "⏰ انقضای اشتراک",
     Topics.GIFT_SENT: "🎁 هدیه‌های ارسالی کاربران",
+    Topics.EMERGENCY_PLAN: "🆘 طرح اضطراری",   # <-- جدید
     
 }
 
