@@ -3,8 +3,6 @@ import asyncio
 import logging
 import sys
 import traceback
-import emergency_plan
-
 from datetime import datetime
 from telegram import Update, BotCommand
 from telegram.ext import (
@@ -37,6 +35,10 @@ from admin import (
     ADMIN_BONUS_INPUT,
     ADMIN_COMMISSION_PERCENT_INPUT,
     ADMIN_CARD_INFO_INPUT,
+    ADMIN_EMERGENCY_PROXY_NAME_INPUT,
+    ADMIN_EMERGENCY_PROXY_LINK_INPUT,
+    ADMIN_EMERGENCY_ADD_USER_ID,
+    ADMIN_EMERGENCY_DENY_REASON,
     set_db as set_admin_db,
     set_admin_ids,
     is_admin,
@@ -89,7 +91,26 @@ from admin import (
     admin_payment_settings_menu,        
     admin_hybrid_payment_toggle,       
     admin_card_info_edit_start,         
-    admin_card_info_edit_input,         
+    admin_card_info_edit_input,
+
+    admin_emergency_proxy_menu,
+    admin_emergency_proxy_delete,
+    admin_emergency_proxy_add_start,
+    admin_emergency_proxy_name_input,
+    admin_emergency_proxy_link_input,
+
+    admin_emergency_settings_menu,
+    admin_emergency_pending_menu,
+    admin_emergency_review_user,
+    admin_emergency_grant,
+    admin_emergency_deny_start,
+    admin_emergency_deny_reason_input,
+    admin_emergency_users_menu,
+    admin_emergency_manage_user,
+    admin_emergency_revoke,
+    admin_emergency_add_user_start,
+    admin_emergency_add_user_id_input,
+    
     set_get_main_menu
 )
 
@@ -207,11 +228,7 @@ def main():
     # Initialize admin list
     admin_ids = config.get_admin_ids()
     set_admin_ids(admin_ids)
-
-    emergency_plan.set_db(db)
-    emergency_plan.set_admin_ids(admin_ids)
-    emergency_plan.set_get_main_menu(handlers.get_main_menu)
-
+    
     set_get_main_menu(handlers.get_main_menu)
     send_gift.set_get_main_menu(handlers.get_main_menu)
 
@@ -504,51 +521,24 @@ def main():
     )
     application.add_handler(admin_card_info_conv)
 
-    # ---------- ویرایش متن پروکسی/کانفیگ ----------
-    emergency_proxy_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(emergency_plan.emergency_edit_proxy_start, pattern="^emg_edit_proxy$")],
+    admin_emergency_proxy_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_emergency_proxy_add_start, pattern="^admin_emergency_proxy_add$")],
         states={
-            emergency_plan.EMERGENCY_PROXY_EDIT_INPUT: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, emergency_plan.emergency_edit_proxy_input)
+            ADMIN_EMERGENCY_PROXY_NAME_INPUT: [
+                CommandHandler("cancel", admin_cancel),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_emergency_proxy_name_input)
+            ],
+            ADMIN_EMERGENCY_PROXY_LINK_INPUT: [
+                CommandHandler("cancel", admin_cancel),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_emergency_proxy_link_input)
             ],
         },
         fallbacks=[CommandHandler("cancel", admin_cancel)]
     )
-    application.add_handler(emergency_proxy_conv)
+    application.add_handler(admin_emergency_proxy_conv)
 
-    emergency_config_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(emergency_plan.emergency_edit_config_start, pattern="^emg_edit_config$")],
-        states={
-            emergency_plan.EMERGENCY_CONFIG_EDIT_INPUT: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, emergency_plan.emergency_edit_config_input)
-            ],
-        },
-        fallbacks=[CommandHandler("cancel", admin_cancel)]
-    )
-    application.add_handler(emergency_config_conv)
-
-    application.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, emergency_plan.emergency_admin_custom_days_input),
-        group=-1
-    )
-
-    # ---------- مدیریت اعضا (لیست/حذف) ----------
-    application.add_handler(CallbackQueryHandler(emergency_plan.emergency_admin_menu, pattern="^emg_admin_menu$"))
-    application.add_handler(CallbackQueryHandler(emergency_plan.emergency_list_members, pattern="^emg_list_members$"))
-    application.add_handler(CallbackQueryHandler(emergency_plan.emergency_remove_member, pattern="^emg_remove_"))
-
-    # ---------- سمت کاربر ----------
-    application.add_handler(CallbackQueryHandler(emergency_plan.emergency_request, pattern="^emergency_request$"))
-    application.add_handler(CallbackQueryHandler(emergency_plan.emergency_get_proxy, pattern="^emergency_get_proxy$"))
-    application.add_handler(CallbackQueryHandler(emergency_plan.emergency_get_config, pattern="^emergency_get_config$"))
-
-    # ---------- تایید/رد/تعیین مدت توسط ادمین ----------
-    application.add_handler(CallbackQueryHandler(emergency_plan.emergency_admin_approve, pattern="^emg_approve_"))
-    application.add_handler(CallbackQueryHandler(emergency_plan.emergency_admin_reject, pattern="^emg_reject_"))
-    application.add_handler(CallbackQueryHandler(emergency_plan.emergency_admin_set_days, pattern="^emg_days_"))
-    application.add_handler(CallbackQueryHandler(emergency_plan.emergency_admin_custom_days_start, pattern="^emg_customdays_"))
-    application.add_handler(CallbackQueryHandler(emergency_plan.emergency_admin_cancel_approve, pattern="^emg_cancelapprove_"))
-
+    application.add_handler(CallbackQueryHandler(admin_emergency_proxy_menu, pattern="^admin_emergency_proxy_settings$"))
+    application.add_handler(CallbackQueryHandler(admin_emergency_proxy_delete, pattern="^admin_emergency_proxy_del_"))
 
     application.add_handler(CallbackQueryHandler(admin_commission_settings_menu, pattern="^admin_commission_settings$"))
     application.add_handler(CallbackQueryHandler(admin_commission_select_panel, pattern="^admin_commission_select_panel$"))
@@ -594,6 +584,44 @@ def main():
     application.add_handler(CallbackQueryHandler(handlers.v2ray_os_selected, pattern="^v2ray_"))
     application.add_handler(CallbackQueryHandler(handlers.view_subscriptions_callback, pattern="^view_subscriptions$"))
     application.add_handler(CallbackQueryHandler(handlers.buy_vpn_callback, pattern="^buy_vpn$"))
+
+    application.add_handler(MessageHandler(filters.Regex("^🆘 طرح اضطراری$"), handlers.emergency_plan))
+    application.add_handler(CallbackQueryHandler(handlers.emergency_build_config, pattern="^emergency_build_config$"))
+    application.add_handler(CallbackQueryHandler(handlers.emergency_get_proxy, pattern="^emergency_get_proxy$"))
+    application.add_handler(CallbackQueryHandler(handlers.emergency_panel_selected, pattern="^emergency_panel_"))
+
+    application.add_handler(CallbackQueryHandler(admin_emergency_settings_menu, pattern="^admin_emergency_settings$"))
+    application.add_handler(CallbackQueryHandler(admin_emergency_pending_menu, pattern="^admin_emergency_pending$"))
+    application.add_handler(CallbackQueryHandler(admin_emergency_review_user, pattern="^admin_emergency_review_"))
+    application.add_handler(CallbackQueryHandler(admin_emergency_grant, pattern="^admin_emergency_grant_"))
+    
+    application.add_handler(CallbackQueryHandler(admin_emergency_users_menu, pattern="^admin_emergency_users_menu$"))
+    application.add_handler(CallbackQueryHandler(admin_emergency_manage_user, pattern="^admin_emergency_manage_"))
+    application.add_handler(CallbackQueryHandler(admin_emergency_revoke, pattern="^admin_emergency_revoke_"))
+
+    admin_emergency_add_user_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_emergency_add_user_start, pattern="^admin_emergency_add_user$")],
+        states={
+            ADMIN_EMERGENCY_ADD_USER_ID: [
+                CommandHandler("cancel", admin_cancel),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_emergency_add_user_id_input)
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", admin_cancel)]
+    )
+    application.add_handler(admin_emergency_add_user_conv)
+
+    admin_emergency_deny_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_emergency_deny_start, pattern="^admin_emergency_deny_")],
+        states={
+            ADMIN_EMERGENCY_DENY_REASON: [
+                CommandHandler("cancel", admin_cancel),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_emergency_deny_reason_input)
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", admin_cancel)]
+    )
+    application.add_handler(admin_emergency_deny_conv)
 
     # Initialize logger after bot is ready (runs after set_bot_commands)
     application.post_init = initialize_logger
