@@ -31,7 +31,7 @@ from bot_settings import (
 
 from panel_manager import get_panel_manager
 from client_manager import PanelClient, PanelClientFactory, get_panel_client
-
+from bot_settings import get_combined_sub_base_url 
 # ============ Import Logger Functions ============
 from logger_bot import (
     log_user_join,
@@ -54,6 +54,9 @@ VOLUME_SELECTION = 3
 
 
 INBOUND_IDS = [82, 80, 81]
+# ============ تنظیمات طرح اضطراری ============
+EMERGENCY_PLAN_VOLUME_GB = 0
+EMERGENCY_PLAN_DURATION_DAYS = 30
 
 # Global database instance
 db = None
@@ -391,13 +394,28 @@ async def admin_reject_payment(update: Update, context: ContextTypes.DEFAULT_TYP
     PENDING_PAYMENTS.pop(request_id, None)
    
 def get_main_menu():
+    """Create main menu keyboard"""
     keyboard = [
         [KeyboardButton("🛒 خرید VPN")],
-        [KeyboardButton("🗂 حساب کاربری"), KeyboardButton("📒 اشتراک ها")],
-        [KeyboardButton("📝 راهنما"), KeyboardButton("💰 افزایش موجودی")],
-        [KeyboardButton("➕ افزایش حجم اضافی"), KeyboardButton("📨 پشتیبانی")],
-        [KeyboardButton("👥 دعوت از دوستان"), KeyboardButton("🎁 ارسال هدیه")],
-        [KeyboardButton("🚨 طرح اضطراری")]   # ← خط جدید
+        [
+            KeyboardButton("🗂 حساب کاربری"),
+            KeyboardButton("📒 اشتراک ها")
+        ],
+        [
+            KeyboardButton("📝 راهنما"),
+            KeyboardButton("💰 افزایش موجودی")
+        ],
+        [
+            KeyboardButton("➕ افزایش حجم اضافی"),
+            KeyboardButton("📨 پشتیبانی")
+        ],
+        [
+            KeyboardButton("👥 دعوت از دوستان"),
+            KeyboardButton("🎁 ارسال هدیه")
+        ],
+        [
+            KeyboardButton("🆘 طرح اضطراری")
+        ]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -474,6 +492,7 @@ def require_membership(func):
             return
         return await func(update, context)
     return wrapper
+
 
 # ============ Start Handler ============
 from telegram.constants import ParseMode
@@ -1890,6 +1909,14 @@ async def cancel_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return ConversationHandler.END
 
+def get_combined_sub_link(user_id: int):
+    """لینک اشتراک یکپارچه (همه پنل‌ها با هم) برای این کاربر"""
+    token = db.get_or_create_sub_token(user_id)
+    if not token:
+        return None
+    base = get_combined_sub_base_url().rstrip('/')
+    return f"{base}/sub/{token}"
+        
 # ============ View Subscriptions ============
 @require_membership
 async def view_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2000,6 +2027,18 @@ async def view_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE)
         """.strip()
         
         await update.message.reply_text(sub_text, parse_mode='HTML')
+
+    # ==================== لینک اشتراک یکپارچه ====================
+    combined_link = get_combined_sub_link(user_id)
+    if combined_link:
+        await update.message.reply_text(
+            "🔗 <b>لینک اشتراک یکپارچه (همه پلن‌ها با هم)</b>\n\n"
+            f"<code>{combined_link}</code>\n\n"
+            "📌 این لینک را در کلاینت خود Import کنید تا همه کانفیگ‌های فعال شما "
+            "(از هر پنلی که باشند) یکجا اضافه شود.\n"
+            "📌 در مرورگر باز کنید تا لیست تک‌تک کانفیگ‌ها را هم ببینید.",
+            parse_mode='HTML'
+        )
     
 # ============ Account Info ============
 @require_membership
@@ -2451,6 +2490,238 @@ async def invite_friends(update: Update, context: ContextTypes.DEFAULT_TYPE):
         invite_text,
         reply_markup=reply_markup,
         parse_mode='HTML'
+    )
+
+@require_membership
+async def emergency_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """منوی طرح اضطراری - نیازمند تایید ادمین"""
+    user = update.effective_user
+    access = db.get_emergency_access(user.id)
+
+    if not access or access.get('status') == 'rejected':
+        db.request_emergency_access(user.id)
+        await send_emergency_access_request(context.bot, user)
+        await update.message.reply_text(
+            "🆘 درخواست شما برای طرح اضطراری برای ادمین ارسال شد.\n"
+            "لطفاً منتظر تایید بمانید؛ پس از تایید به شما اطلاع داده می‌شود."
+        )
+        return
+
+    if access.get('status') == 'pending':
+        await update.message.reply_text(
+            "⏳ درخواست شما در حال بررسی توسط ادمین است. لطفاً منتظر بمانید."
+        )
+        return
+
+    access_type = access.get('access_type')
+    keyboard = []
+    if access_type in ('config', 'both'):
+        keyboard.append([InlineKeyboardButton("🔧 ساخت کانفیگ", callback_data="emergency_build_config")])
+    if access_type in ('proxy', 'both'):
+        keyboard.append([InlineKeyboardButton("🌐 دریافت پروکسی", callback_data="emergency_get_proxy")])
+
+    await update.message.reply_text(
+        "🆘 طرح اضطراری\n\nلطفاً یکی از گزینه‌های زیر را انتخاب کنید:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+async def send_emergency_access_request(bot, user):
+    """ارسال درخواست دسترسی طرح اضطراری به گروه لاگ همراه با دکمه‌های تصمیم‌گیری"""
+    from logger_bot import LOG_GROUP_ID, get_thread_id, Topics, format_user_full
+
+    if not LOG_GROUP_ID:
+        logger.warning("LOG_GROUP_ID تنظیم نشده؛ درخواست طرح اضطراری ارسال نشد.")
+        return
+
+    user_info = format_user_full(user.id, user.username, user.first_name, getattr(user, 'last_name', None))
+    text = (
+        f"🆘 <b>درخواست جدید طرح اضطراری</b>\n\n"
+        f"{user_info}\n\n"
+        f"لطفاً نوع دسترسی را تعیین کنید یا درخواست را رد کنید:"
+    )
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🔧 کانفیگ", callback_data=f"admin_emergency_grant_config_{user.id}"),
+            InlineKeyboardButton("🌐 پروکسی", callback_data=f"admin_emergency_grant_proxy_{user.id}"),
+        ],
+        [
+            InlineKeyboardButton("✅ هردو", callback_data=f"admin_emergency_grant_both_{user.id}"),
+            InlineKeyboardButton("❌ رد", callback_data=f"admin_emergency_deny_{user.id}"),
+        ]
+    ])
+
+    thread_id = get_thread_id(Topics.EMERGENCY_PLAN)
+    try:
+        await bot.send_message(
+            chat_id=LOG_GROUP_ID, text=text, parse_mode='HTML',
+            message_thread_id=thread_id, reply_markup=keyboard
+        )
+    except Exception as e:
+        logger.error(f"Error sending emergency access request: {e}")
+        
+async def emergency_build_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+    access = db.get_emergency_access(user_id)
+    if not access or access.get('status') != 'approved' or access.get('access_type') not in ('config', 'both'):
+        await query.edit_message_text("⛔️ شما به بخش «ساخت کانفیگ» طرح اضطراری دسترسی ندارید.")
+        return
+    
+    panel_manager = get_panel_manager()
+    all_panels = panel_manager.get_all_panels()
+
+    if not all_panels:
+        await query.edit_message_text("❌ در حال حاضر هیچ پنلی فعال نیست.")
+        return
+
+    existing_panel_ids = db.get_emergency_panel_ids(user_id)
+
+    keyboard = []
+    for panel_id, panel_data in all_panels.items():
+        if not panel_data.get('enabled', True):
+            continue
+        if 'emergency' not in panel_data.get('plan_types', []):  # <-- فیلتر جدید
+            continue
+        if panel_id in existing_panel_ids:
+            continue
+        keyboard.append([InlineKeyboardButton(
+            f"🖥 {panel_data.get('name', panel_id)}",
+            callback_data=f"emergency_panel_{panel_id}"
+        )])
+
+    if not keyboard:
+        await query.edit_message_text(
+            "😔 در حال حاضر پنلی برای دریافت کانفیگ اضطراری تنظیم نشده یا شما قبلاً از تمام پنل‌های موجود دریافت کرده‌اید.\n\n"
+            "لطفاً با پشتیبانی تماس بگیرید."
+        )
+        return
+
+    await query.edit_message_text(
+        "🔧 ساخت کانفیگ اضطراری\n\n"
+        "لطفاً پنل مورد نظر برای دریافت اشتراک اضطراری رایگان را انتخاب کنید:\n"
+        "⚠️ فقط یک اشتراک اضطراری از هر پنل مجاز است.",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+async def emergency_get_proxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+    access = db.get_emergency_access(user_id)
+    if not access or access.get('status') != 'approved' or access.get('access_type') not in ('proxy', 'both'):
+        await query.edit_message_text("⛔️ شما به بخش «دریافت پروکسی» طرح اضطراری دسترسی ندارید.")
+        return
+
+    from bot_settings import get_emergency_proxy_links
+    proxies = get_emergency_proxy_links()
+
+    if not proxies:
+        await query.edit_message_text(
+            "😔 در حال حاضر پروکسی‌ای برای ارسال موجود نیست.\n"
+            "لطفاً بعداً دوباره امتحان کن یا با پشتیبانی در تماس باش."
+        )
+        return
+
+    keyboard = []
+    row = []
+    for i, p in enumerate(proxies):
+        row.append(InlineKeyboardButton(f"{i+1}.{p.get('name', 'Proxy')}", url=p.get('link')))
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+
+    message = (
+        "🎁 <b>پروکسی ویژه اشتراک شما آماده‌ست!</b>\n\n"
+        "می‌دونیم گاهی عجله داری و نمی‌تونی منتظر بمونی، برای همین این پروکسی‌ها رو "
+        "همین الان برات آماده کردیم تا بدون وقفه به راهت ادامه بدی 🌿\n\n"
+        "👇 کافیه روی هرکدوم بزنی تا مستقیم به کلاینتت اضافه بشه.\n\n"
+        "اگه سوالی داشتی، پشتیبانی همیشه کنارته 💬"
+    )
+
+    await query.edit_message_text(
+        message,
+        parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    
+async def emergency_panel_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """کاربر پنل مورد نظر برای دریافت کلاینت اضطراری (رایگان) را انتخاب کرد"""
+    query = update.callback_query
+    await query.answer()
+
+    panel_id = query.data.replace("emergency_panel_", "")
+    user_id = query.from_user.id
+
+    panel_manager = get_panel_manager()
+    panel_data = panel_manager.get_panel(panel_id)
+
+    if not panel_data or not panel_data.get('enabled', True):
+        await query.edit_message_text("❌ این پنل در دسترس نیست.")
+        return
+
+    # جلوگیری از ساخت بیش از یک کلاینت اضطراری روی هر پنل
+    if db.has_emergency_subscription(user_id, panel_id):
+        await query.edit_message_text("⚠️ شما قبلاً از این پنل اشتراک اضطراری دریافت کرده‌اید.")
+        return
+
+    await query.edit_message_text("⏳ در حال ایجاد اشتراک اضطراری...")
+
+    panel_client = PanelClient(panel_id)
+    email = f"{user_id}_emg_{panel_id}"
+    inbound_ids = panel_data.get('inbound_ids', [82, 80, 81])
+
+    success, msg, client_data = panel_client.create_client(
+        email=email,
+        total_gb=EMERGENCY_PLAN_VOLUME_GB,
+        expiry_days=EMERGENCY_PLAN_DURATION_DAYS,
+        inbound_ids=inbound_ids
+    )
+
+    if not success or not client_data:
+        await query.edit_message_text(
+            f"❌ خطا در ایجاد اشتراک اضطراری در پنل: {msg}\n\n"
+            "لطفاً با پشتیبانی تماس بگیرید."
+        )
+        return
+
+    links = panel_client.get_client_links(email)
+    if not links:
+        sub_id = client_data.get('subId')
+        links = [f"{panel_client.panel_base}/sub/{sub_id}"] if sub_id else []
+
+    db.add_subscription(
+        user_id=user_id,
+        protocol='v2ray',
+        duration_days=EMERGENCY_PLAN_DURATION_DAYS,
+        plan_type='emergency',
+        initial_volume=EMERGENCY_PLAN_VOLUME_GB,
+        plan_name="🆘 طرح اضطراری",
+        email=email,
+        panel_id=panel_id
+    )
+
+    if links:
+        lines = "\n\n".join(f"🔸 کانفیگ {i+1}:\n<code>{l}</code>" for i, l in enumerate(links))
+        config_text = f"🔗 لینک‌های اشتراک شما ({len(links)} عدد):\n\n{lines}"
+    else:
+        config_text = f"⚠️ شناسه اشتراک: <code>{email}</code>\n\nلطفاً با پشتیبانی تماس بگیرید."
+
+    await query.edit_message_text(
+        f"✅ اشتراک اضطراری شما با موفقیت ایجاد شد!\n\n"
+        f"🖥 پنل: {panel_data.get('name', panel_id)}\n"
+        f"📊 حجم: {EMERGENCY_PLAN_VOLUME_GB} گیگ\n"
+        f"⏰ مدت: {EMERGENCY_PLAN_DURATION_DAYS} روز\n\n"
+        f"{config_text}",
+        parse_mode='HTML'
+    )
+    await query.message.reply_text(
+        "به منوی اصلی خوش آمدید!",
+        reply_markup=get_main_menu()
     )
     
 # ============ Navigation Handlers ============
