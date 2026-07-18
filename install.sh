@@ -219,6 +219,33 @@ EOF
   ok "config.json file created (restricted access)."
 }
 
+# ============================================================
+# ========== جایگذاری مقادیر در فایل index.php موجود ==========
+# ============================================================
+configure_index_php(){
+  local index_file="${INSTALL_DIR}/index.php"
+  
+  if [[ ! -f "$index_file" ]]; then
+    warn "index.php not found at $index_file. Skipping configuration."
+    return
+  fi
+
+  local protocol="http"
+  if [[ -n "${SSL_CERT_PATH:-}" && -n "${SSL_KEY_PATH:-}" ]]; then
+    protocol="https"
+  fi
+
+  local api_base="${protocol}://${SSL_DOMAIN}:2053"
+
+  # جایگذاری API_BASE در فایل موجود
+  sed -i "s|const API_BASE = '';|const API_BASE = '${api_base}';|g" "$index_file"
+  
+  # API_KEY را خالی نگه می‌داریم (در صورت نیاز کاربر خودش تنظیم کند)
+  # sed -i "s|const API_KEY  = '';|const API_KEY  = '${API_KEY}';|g" "$index_file"
+
+  ok "index.php configured with API_BASE = ${api_base}"
+}
+
 clone_or_update_repo(){
   if [[ -d "${INSTALL_DIR}/.git" ]]; then
     info "Project already exists, updating..."
@@ -237,6 +264,10 @@ setup_venv(){
   ${PY_BIN} -m venv venv
   source venv/bin/activate
   pip install --upgrade pip -q
+  # اطمینان از نصب aiohttp
+  if ! grep -q aiohttp requirements.txt 2>/dev/null; then
+    echo "aiohttp" >> requirements.txt
+  fi
   pip install -r requirements.txt -q
   deactivate
   ok "Python packages installed."
@@ -358,10 +389,8 @@ show_test_guide(){
   echo "  📌 index.php file for Iran host:"
   echo "     📂 File location on this server: ${INSTALL_DIR}/index.php"
   echo "     📤 Upload this file to your Iran host at /sub/index.php (root of the site)."
-  echo "     ✏️  Before uploading, change API_BASE in index.php to your sub_api address."
-  echo ""
-  echo "  🔧 Example: If sub_api is running on https://pio.heysolo.ir:2053"
-  echo "     const API_BASE = 'https://pio.heysolo.ir:2053';"
+  echo "     ✏️  The file has been pre-configured with API_BASE = ${protocol}://${domain}:${port}"
+  echo "     🔑 If you use API_KEY, set it in the file before uploading."
   echo ""
   echo "============================================================"
 }
@@ -381,6 +410,7 @@ full_install(){
   collect_ssl_config
   clone_or_update_repo
   write_config_json "${INSTALL_DIR}"
+  configure_index_php
   setup_venv
   run_db_setup_script
   create_systemd_services
@@ -399,6 +429,7 @@ update_bot(){
   fi
   detect_python
   clone_or_update_repo
+  configure_index_php
   setup_venv
   systemctl restart "${SERVICE_NAME}"
   systemctl restart "${SUB_SERVICE_NAME}"
