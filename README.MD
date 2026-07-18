@@ -29,7 +29,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Mahersaber2024/JadeTunnel-sa
 ## Uninstallation
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/Mahersaber2024/JadeTunnel-sales/main/install.sh)
-
+---
 ---
 
 ## سرویس‌های systemd
