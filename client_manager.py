@@ -45,7 +45,7 @@ class PanelClient:
             self.panel_id = self.panel_data.get('id')
             logger.info(f"Using panel: {self.panel_data.get('name')} ({self.panel_base})")
         else:
-            logger.error("No panel configured")
+            logger.error(f"No panel configured (panel_id={self.panel_id!r})")
     
     def _get_session(self):
         """Get session with CSRF token"""
@@ -314,15 +314,14 @@ class PanelClientFactory:
         return result
 
 
-# ========== Singleton instance ==========
-_default_client = None
+# ========== Factory function ==========
+# توجه: قبلاً یک نمونه‌ی PanelClient پیش‌فرض (بدون panel_id) در متغیر
+# سراسری _default_client کش می‌شد و فقط بار اول ساخته می‌شد. اگر بعداً
+# پنل پیش‌فرض عوض/اضافه می‌شد، این کلاینت قدیمی همچنان استفاده می‌شد و
+# باعث خطای "No panel configured" در سرویس‌های جدا (مثل sub_api.py)
+# می‌شد. ساخت PanelClient سبک است (فقط تنظیمات را می‌خواند؛ سشن HTTP
+# فقط هنگام نیاز واقعی/lazy باز می‌شود)، پس دیگر کش نمی‌کنیم.
 
 def get_panel_client(panel_id: str = None) -> PanelClient:
-    """Get or create panel client instance"""
-    global _default_client
-    if panel_id:
-        return PanelClient(panel_id)
-    
-    if _default_client is None:
-        _default_client = PanelClient()
-    return _default_client
+    """Get a fresh panel client instance (no stale caching)"""
+    return PanelClient(panel_id)
