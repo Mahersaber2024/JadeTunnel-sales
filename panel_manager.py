@@ -43,6 +43,7 @@ class PanelManager:
         self.panels: Dict[str, dict] = {}
         self.default_panel: Optional[str] = None
         self.panel_usage: Dict[str, int] = {}
+        self._panels_mtime: Optional[float] = None  # <-- زمان آخرین تغییر فایل روی دیسک
         self._load_panels()
     
     def _load_panels(self):
@@ -55,6 +56,11 @@ class PanelManager:
                     self.default_panel = data.get('default_panel')
                     self.panel_usage = data.get('usage', {})
                     logger.info(f"Loaded {len(self.panels)} panels from config")
+                # ثبت زمان آخرین تغییر فایل، برای تشخیص تغییرات بعدی توسط پردازه‌های دیگر
+                try:
+                    self._panels_mtime = os.path.getmtime(PANELS_FILE)
+                except OSError:
+                    self._panels_mtime = None
             except Exception as e:
                 logger.error(f"Error loading panels: {e}")
                 self.panels = {}
@@ -63,6 +69,28 @@ class PanelManager:
         else:
             # Try to load from .env for backward compatibility
             self._migrate_from_env()
+
+    def _maybe_reload(self):
+        """
+        اگر فایل panels.json روی دیسک بعد از آخرین بار خواندن ما تغییر کرده باشد،
+        دوباره لودش می‌کنیم.
+
+        رفع می‌کند مشکل «Stale cache بین پردازه‌ها» را: وقتی ربات اصلی (main.py)
+        یک پنل جدید اضافه/ویرایش می‌کند، سرویس جدای sub_api.py که یک
+        PanelManager singleton مستقل در حافظه‌ی خودش دارد، هیچ‌وقت متوجه
+        تغییر نمی‌شد و همچنان با پنل‌های قدیمی کار می‌کرد. در نتیجه
+        get_panel(panel_id) برای پنل‌های تازه‌ساخته None برمی‌گرداند، در لاگ
+        خطای «No panel configured» ثبت می‌شد و لینک اشتراک کاربر خالی می‌ماند.
+        """
+        try:
+            if not os.path.exists(PANELS_FILE):
+                return
+            mtime = os.path.getmtime(PANELS_FILE)
+            if self._panels_mtime is None or mtime > self._panels_mtime:
+                logger.info("panels.json changed on disk — reloading panel manager cache")
+                self._load_panels()
+        except OSError:
+            pass
     
     def _save_panels(self):
         """Save panels to JSON file"""
@@ -76,6 +104,12 @@ class PanelManager:
             }
             with open(PANELS_FILE, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
+            # آپدیت mtime داخلی بلافاصله بعد از نوشتن، تا خودمان را به اشتباه
+            # «تغییر یافته روی دیسک» تشخیص ندهیم و ری‌لود بی‌مورد انجام ندهیم
+            try:
+                self._panels_mtime = os.path.getmtime(PANELS_FILE)
+            except OSError:
+                pass
             logger.info("Panels saved successfully")
         except Exception as e:
             logger.error(f"Error saving panels: {e}")
@@ -126,18 +160,21 @@ class PanelManager:
     
     def get_panel(self, panel_id: str = None) -> Optional[dict]:
         """Get a panel by ID, or default panel if None"""
+        self._maybe_reload()
         if not panel_id:
             panel_id = self.default_panel
         return self.panels.get(panel_id)
     
     def get_default_panel(self) -> Optional[dict]:
         """Get default panel"""
+        self._maybe_reload()
         if self.default_panel:
             return self.panels.get(self.default_panel)
         return None
     
     def get_all_panels(self) -> Dict[str, dict]:
         """Get all panels"""
+        self._maybe_reload()
         return self.panels
     
     def get_panel_for_subscription(self, plan_type: str = 'old') -> Tuple[Optional[dict], Optional[str]]:
@@ -148,6 +185,7 @@ class PanelManager:
         Args:
             plan_type: نوع طرح ('new', 'old', 'custom_charge', 'emergency', ...)
         """
+        self._maybe_reload()
         if not self.panels:
             return None, None
 
