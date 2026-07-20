@@ -17,6 +17,10 @@ from telegram.ext import (
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from handlers import admin_approve_payment, admin_reject_payment
 
+import lifeline
+from telegram.ext import ChatMemberHandler
+from bot_settings import get_sponsor_channel
+
 from config import config
 from database import Database
 import handlers
@@ -39,6 +43,12 @@ from admin import (
     ADMIN_EMERGENCY_PROXY_LINK_INPUT,
     ADMIN_EMERGENCY_ADD_USER_ID,
     ADMIN_EMERGENCY_DENY_REASON,
+    ADMIN_MANUAL_SUB_USER_ID,
+    ADMIN_MANUAL_SUB_PLAN_NAME,
+    ADMIN_MANUAL_SUB_EXPIRY,
+    ADMIN_MANUAL_SUB_VOLUME,        # <-- جدید
+    ADMIN_MANUAL_SUB_PRIORITY,
+    ADMIN_MANUAL_SUB_CONFIG,
     set_db as set_admin_db,
     set_admin_ids,
     is_admin,
@@ -110,6 +120,29 @@ from admin import (
     admin_emergency_revoke,
     admin_emergency_add_user_start,
     admin_emergency_add_user_id_input,
+
+    ADMIN_MANUAL_SUB_USER_ID,
+    ADMIN_MANUAL_SUB_PLAN_NAME,
+    ADMIN_MANUAL_SUB_EXPIRY,
+    ADMIN_MANUAL_SUB_PRIORITY,
+    ADMIN_MANUAL_SUB_CONFIG,
+    ADMIN_ADDCONFIG_USER_ID,
+    ADMIN_ADDCONFIG_SELECT_SUB,
+    ADMIN_ADDCONFIG_PRIORITY,
+    ADMIN_ADDCONFIG_LINK,
+    admin_manual_sub_start,
+    admin_manual_sub_user_id,
+    admin_manual_sub_plan_selected,
+    admin_manual_sub_plan_name_text,
+    admin_manual_sub_expiry_input,
+    admin_manual_sub_volume_input,
+    admin_manual_sub_priority_selected,
+    admin_manual_sub_config_input,
+    admin_addconfig_start,
+    admin_addconfig_user_id,
+    admin_addconfig_select_sub,
+    admin_addconfig_priority_selected,
+    admin_addconfig_link_input,
     
     set_get_main_menu
 )
@@ -220,6 +253,8 @@ def main():
         handlers.set_db(db)
         set_admin_db(db)
         send_gift.set_db(db)
+        lifeline.set_db(db)
+        lifeline.set_channel(get_sponsor_channel())
         print("✅ Database connected successfully!")
     except Exception as e:
         print(f"\n❌ Failed to connect to database: {e}")
@@ -537,6 +572,66 @@ def main():
     )
     application.add_handler(admin_emergency_proxy_conv)
 
+    # Admin Manual Subscription Conversation
+    admin_manual_sub_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_manual_sub_start, pattern="^admin_manual_sub_add$")],
+        states={
+            ADMIN_MANUAL_SUB_USER_ID: [
+                CommandHandler("cancel", admin_cancel),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_manual_sub_user_id)
+            ],
+            ADMIN_MANUAL_SUB_PLAN_NAME: [
+                CommandHandler("cancel", admin_cancel),
+                CallbackQueryHandler(admin_manual_sub_plan_selected, pattern="^admin_manual_plan_"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_manual_sub_plan_name_text)
+            ],
+            ADMIN_MANUAL_SUB_EXPIRY: [
+                CommandHandler("cancel", admin_cancel),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_manual_sub_expiry_input)
+            ],
+            ADMIN_MANUAL_SUB_VOLUME: [                                       # <-- جدید
+                CommandHandler("cancel", admin_cancel),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_manual_sub_volume_input)
+            ],
+            ADMIN_MANUAL_SUB_PRIORITY: [
+                CommandHandler("cancel", admin_cancel),
+                CallbackQueryHandler(admin_manual_sub_priority_selected, pattern="^admin_manual_priority_")
+            ],
+            ADMIN_MANUAL_SUB_CONFIG: [
+                CommandHandler("cancel", admin_cancel),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_manual_sub_config_input)
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", admin_cancel)]
+    )
+    application.add_handler(admin_manual_sub_conv)
+
+    # Admin Add Config to Existing Subscription Conversation
+    admin_addconfig_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_addconfig_start, pattern="^admin_addconfig_start$")],
+        states={
+            ADMIN_ADDCONFIG_USER_ID: [
+                CommandHandler("cancel", admin_cancel),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_addconfig_user_id)
+            ],
+            ADMIN_ADDCONFIG_SELECT_SUB: [
+                CommandHandler("cancel", admin_cancel),
+                CallbackQueryHandler(admin_addconfig_select_sub, pattern="^admin_addconfig_sub_")
+            ],
+            ADMIN_ADDCONFIG_PRIORITY: [
+                CommandHandler("cancel", admin_cancel),
+                CallbackQueryHandler(admin_addconfig_priority_selected, pattern="^admin_addconfig_priority_")
+            ],
+            ADMIN_ADDCONFIG_LINK: [
+                CommandHandler("cancel", admin_cancel),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_addconfig_link_input)
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", admin_cancel)]
+    )
+    application.add_handler(admin_addconfig_conv)
+    
+    application.add_handler(CallbackQueryHandler(handlers.send_config_by_priority, pattern="^get_config_"))
     application.add_handler(CallbackQueryHandler(admin_emergency_proxy_menu, pattern="^admin_emergency_proxy_settings$"))
     application.add_handler(CallbackQueryHandler(admin_emergency_proxy_delete, pattern="^admin_emergency_proxy_del_"))
 
@@ -623,6 +718,39 @@ def main():
     )
     application.add_handler(admin_emergency_deny_conv)
 
+    # ====================== Lifeline (چراغ جاده تونل) ======================
+    async def handle_channel_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        result = update.chat_member
+        if not result:
+            return
+        old_status = result.old_chat_member.status
+        new_status = result.new_chat_member.status
+        was_member = old_status in ("member", "administrator", "creator")
+        if was_member and new_status in ("left", "kicked"):
+            await lifeline.subtract_day(context.bot)
+
+    application.add_handler(ChatMemberHandler(handle_channel_member_update, ChatMemberHandler.CHAT_MEMBER))
+
+    application.job_queue.run_repeating(lifeline.refresh_pulse, interval=1800, first=10)
+
+    async def admin_lifeline_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not is_admin(update.effective_user.id):
+            return
+        row = db.get_lifeline()
+        if not context.args:
+            await update.message.reply_text(f"روز باقیمانده: {row['days_remaining']} از {row['max_days']}")
+            return
+        try:
+            new_days = int(context.args[0])
+        except ValueError:
+            await update.message.reply_text("عدد نامعتبر است.")
+            return
+        db.adjust_lifeline_days(new_days - row['days_remaining'], max_days=row['max_days'])
+        await lifeline.post_or_update_lifeline(context.bot)
+        await update.message.reply_text(f"✅ روز باقیمانده به {new_days} تنظیم شد.")
+
+    application.add_handler(CommandHandler("lifeline", admin_lifeline_command))
+
     # Initialize logger after bot is ready (runs after set_bot_commands)
     application.post_init = initialize_logger
 
@@ -636,7 +764,6 @@ def main():
         application.run_polling(allowed_updates=Update.ALL_TYPES)
     except Exception as e:
         print(f"\n❌ Bot stopped with error: {e}")
-
 
 if __name__ == "__main__":
     try:
