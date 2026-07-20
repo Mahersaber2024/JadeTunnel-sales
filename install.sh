@@ -176,6 +176,42 @@ PYEOF
   fi
 }
 
+# ============================================================
+# ========== تنظیمات کانال اسپانسر ==========
+# ============================================================
+collect_sponsor_channel_config(){
+  echo
+  echo "======================================"
+  echo "        Sponsor Channel Settings"
+  echo "======================================"
+
+  read -rp "Sponsor channel username (with or without @, e.g. @jadetunnell) [@jadetunnell]: " SPONSOR_CHANNEL
+  SPONSOR_CHANNEL=${SPONSOR_CHANNEL:-@jadetunnell}
+  # اگر لینک کامل t.me وارد شده باشد، فقط یوزرنیم را استخراج کن
+  if [[ "$SPONSOR_CHANNEL" == *"t.me/"* ]]; then
+    SPONSOR_CHANNEL="${SPONSOR_CHANNEL#*t.me/}"
+    SPONSOR_CHANNEL="${SPONSOR_CHANNEL%%\?*}"
+    SPONSOR_CHANNEL="${SPONSOR_CHANNEL%%/}"
+  fi
+  if [[ "$SPONSOR_CHANNEL" != @* ]]; then
+    SPONSOR_CHANNEL="@${SPONSOR_CHANNEL}"
+  fi
+
+  read -rp "Sponsor channel display title (shown to users) [Jade Tunnel]: " SPONSOR_CHANNEL_TITLE
+  SPONSOR_CHANNEL_TITLE=${SPONSOR_CHANNEL_TITLE:-Jade Tunnel}
+
+  read -rp "Require channel membership to use the bot? (y/n) [y]: " MEMBERSHIP_REQUIRED_INPUT
+  MEMBERSHIP_REQUIRED_INPUT=${MEMBERSHIP_REQUIRED_INPUT:-y}
+  if [[ "$MEMBERSHIP_REQUIRED_INPUT" =~ ^[Yy]$ ]]; then
+    MEMBERSHIP_REQUIRED_JSON="true"
+  else
+    MEMBERSHIP_REQUIRED_JSON="false"
+  fi
+
+  ok "Sponsor channel set to ${SPONSOR_CHANNEL} (${SPONSOR_CHANNEL_TITLE})."
+  warn "Make sure the bot is an admin in this channel, otherwise membership checks will fail."
+}
+
 collect_iran_host_config(){
   echo
   echo "======================================"
@@ -245,6 +281,30 @@ write_config_json(){
 EOF
   chmod 600 "${target}/config.json"
   ok "config.json file created (restricted access)."
+}
+
+# ============================================================
+# ========== نوشتن bot_settings.json با اطلاعات کانال اسپانسر ==========
+# ============================================================
+write_bot_settings_json(){
+  local target="$1"
+  local settings_file="${target}/bot_settings.json"
+
+  # اگر فایل تنظیمات قبلاً وجود دارد (مثلاً در آپدیت)، آن را دست‌نخورده نگه دار
+  if [[ -f "$settings_file" ]]; then
+    info "bot_settings.json already exists, skipping (use the admin panel to change the sponsor channel)."
+    return
+  fi
+
+  cat > "${settings_file}" <<EOF
+{
+    "sponsor_channel": "${SPONSOR_CHANNEL}",
+    "sponsor_channel_title": "${SPONSOR_CHANNEL_TITLE}",
+    "membership_required": ${MEMBERSHIP_REQUIRED_JSON},
+    "combined_sub_base_url": "${IRAN_HOST_URL}"
+}
+EOF
+  ok "bot_settings.json file created with sponsor channel info."
 }
 
 # ============================================================
@@ -432,6 +492,10 @@ show_test_guide(){
   echo "  📌 Sample subscription link for users:"
   echo "     ${IRAN_HOST_URL}/sub/USER_TOKEN"
   echo ""
+  echo "  📌 Sponsor channel configured:"
+  echo "     ${SPONSOR_CHANNEL} (${SPONSOR_CHANNEL_TITLE})"
+  echo "     ⚠️  Make sure the bot is an admin in this channel."
+  echo ""
   echo "  📌 View logs:"
   echo "     journalctl -u ${SERVICE_NAME} -f"
   echo "     journalctl -u ${SUB_SERVICE_NAME} -f"
@@ -456,11 +520,13 @@ full_install(){
   install_system_packages
   setup_database
   collect_bot_config
+  collect_sponsor_channel_config
   collect_iran_host_config
   collect_ssl_config
   clone_or_update_repo
   verify_required_files
   write_config_json "${INSTALL_DIR}"
+  write_bot_settings_json "${INSTALL_DIR}"
   configure_index_php
   setup_venv
   run_db_setup_script
