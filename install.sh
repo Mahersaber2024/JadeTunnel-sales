@@ -15,6 +15,23 @@ SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 SUB_SERVICE_FILE="/etc/systemd/system/${SUB_SERVICE_NAME}.service"
 STATE_FILE="/etc/${SERVICE_NAME}.install_dir"
 
+# فایل‌های سورس ضروری که باید در ریپو موجود باشند
+REQUIRED_FILES=(
+  "main.py"
+  "handlers.py"
+  "lifeline.py"
+  "sub_api.py"
+  "database.py"
+  "config.py"
+  "panel_manager.py"
+  "client_manager.py"
+  "logger_bot.py"
+  "bot_settings.py"
+  "admin.py"
+  "send_gift.py"
+  "requirements.txt"
+)
+
 # ------------------ Colors ------------------
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
 
@@ -58,7 +75,18 @@ detect_python(){
 install_system_packages(){
   info "Installing system dependencies..."
   apt-get update -y
-  apt-get install -y python3 python3-venv python3-pip git curl build-essential libpq-dev certbot
+  # python3-dev / libjpeg-dev / zlib1g-dev / libfreetype6-dev:
+  #   در صورتی که pip نتواند wheel آماده‌ی Pillow را برای معماری این سرور
+  #   دانلود کند، این پکیج‌ها امکان کامپایل آن از سورس را فراهم می‌کنند.
+  # fonts-dejavu-core:
+  #   lifeline.py برای رسم گیج دایره‌ای از فونت زیر استفاده می‌کند:
+  #   /usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf
+  #   بدون این پکیج، کد کرش نمی‌کند ولی خروجی تصویری با فونت پیش‌فرض
+  #   بی‌کیفیت جایگزین می‌شود.
+  apt-get install -y \
+    python3 python3-venv python3-pip python3-dev \
+    git curl build-essential libpq-dev certbot \
+    fonts-dejavu-core libjpeg-dev zlib1g-dev libfreetype6-dev
   ok "System dependencies installed."
 }
 
@@ -258,16 +286,38 @@ clone_or_update_repo(){
   ok "Project code is ready."
 }
 
+# ============================================================
+# ========== بررسی وجود فایل‌های حیاتی سورس ==========
+# ============================================================
+verify_required_files(){
+  info "Verifying required source files..."
+  local missing=()
+
+  for f in "${REQUIRED_FILES[@]}"; do
+    if [[ ! -f "${INSTALL_DIR}/${f}" ]]; then
+      missing+=("$f")
+    fi
+  done
+
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    err "The following required files are missing from the repository:"
+    for f in "${missing[@]}"; do
+      echo "   - $f"
+    done
+    err "Please make sure these files are committed and pushed to: ${REPO_URL}"
+    err "Then run this installer again (option 2: Update bot)."
+    exit 1
+  fi
+
+  ok "All required source files are present."
+}
+
 setup_venv(){
   info "Creating Python virtual environment and installing packages..."
   cd "${INSTALL_DIR}"
   ${PY_BIN} -m venv venv
   source venv/bin/activate
   pip install --upgrade pip -q
-  # اطمینان از نصب aiohttp
-  if ! grep -q aiohttp requirements.txt 2>/dev/null; then
-    echo "aiohttp" >> requirements.txt
-  fi
   pip install -r requirements.txt -q
   deactivate
   ok "Python packages installed."
@@ -409,6 +459,7 @@ full_install(){
   collect_iran_host_config
   collect_ssl_config
   clone_or_update_repo
+  verify_required_files
   write_config_json "${INSTALL_DIR}"
   configure_index_php
   setup_venv
@@ -429,6 +480,7 @@ update_bot(){
   fi
   detect_python
   clone_or_update_repo
+  verify_required_files
   configure_index_php
   setup_venv
   systemctl restart "${SERVICE_NAME}"
