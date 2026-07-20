@@ -37,6 +37,24 @@ ADMIN_EMERGENCY_PROXY_NAME_INPUT = 18
 ADMIN_EMERGENCY_PROXY_LINK_INPUT = 19
 ADMIN_EMERGENCY_ADD_USER_ID = 20
 ADMIN_EMERGENCY_DENY_REASON = 21
+ADMIN_MANUAL_SUB_USER_ID = 22
+ADMIN_MANUAL_SUB_PLAN_NAME = 23
+ADMIN_MANUAL_SUB_EXPIRY = 24
+ADMIN_MANUAL_SUB_PRIORITY = 25
+ADMIN_MANUAL_SUB_CONFIG = 26
+ADMIN_ADDCONFIG_USER_ID = 27
+ADMIN_ADDCONFIG_SELECT_SUB = 28
+ADMIN_ADDCONFIG_PRIORITY = 29
+ADMIN_ADDCONFIG_LINK = 30
+ADMIN_MANUAL_SUB_VOLUME = 31
+
+MANUAL_PLAN_PRESETS = {
+    'balanced': '🟢 متعادل',
+    'fair': '🔥 منصفانه',
+    'pro': '💎 حرفه‌ای',
+    'old': '📦 نامحدود تک کاربر',
+    'customcharge': '🔥 طرح شارژ دلخواه',
+}
 
 from bot_settings import (
     get_sponsor_channel,
@@ -177,6 +195,8 @@ async def admin_user_management_menu(update: Update, context: ContextTypes.DEFAU
 
     keyboard = [
         [InlineKeyboardButton("💰 Add User Balance", callback_data="admin_add_balance")],
+        [InlineKeyboardButton("➕ Add Manual Subscription", callback_data="admin_manual_sub_add")],
+        [InlineKeyboardButton("➕ Add Config to Subscription", callback_data="admin_addconfig_start")],
         [InlineKeyboardButton("🗑 Delete / Reset User Subscription", callback_data="admin_delete_sub")],
         [InlineKeyboardButton("🧨 Delete User", callback_data="admin_delete_user")],
         [InlineKeyboardButton("♻️ Reset User Wallet", callback_data="admin_reset_balance")],
@@ -2751,4 +2771,456 @@ async def admin_emergency_add_user_id_input(update: Update, context: ContextType
         f"👤 User ID: {target_user_id}\n\nنوع دسترسی را انتخاب کنید:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
+    return ConversationHandler.END
+
+# ============ Admin: Manual Subscription (plan + expiry + priority + raw config) ============
+
+def _plan_preset_keyboard():
+    keyboard = [
+        [InlineKeyboardButton(v, callback_data=f"admin_manual_plan_{k}")]
+        for k, v in MANUAL_PLAN_PRESETS.items()
+    ]
+    keyboard.append([InlineKeyboardButton("✏️ نام دلخواه", callback_data="admin_manual_plan_other")])
+    return InlineKeyboardMarkup(keyboard)
+
+
+def _priority_keyboard(prefix: str):
+    keyboard = [
+        [InlineKeyboardButton("🥇 اولویت اول (اصلی)", callback_data=f"{prefix}_1")],
+        [InlineKeyboardButton("🥈 اولویت دوم", callback_data=f"{prefix}_2")],
+        [InlineKeyboardButton("🥉 اولویت سوم", callback_data=f"{prefix}_3")],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+async def admin_manual_sub_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id):
+        await query.edit_message_text("⛔️ You do not have admin access.")
+        return ConversationHandler.END
+
+    await query.edit_message_text(
+        "➕ افزودن اشتراک دستی\n\n"
+        "👤 لطفاً آیدی عددی کاربر را ارسال کنید:\n\n"
+        "⚠️ برای انصراف /cancel بفرستید."
+    )
+    return ADMIN_MANUAL_SUB_USER_ID
+
+
+async def admin_manual_sub_user_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    if text == "/cancel":
+        await update.message.reply_text("❌ Operation cancelled.", reply_markup=get_main_menu())
+        return ConversationHandler.END
+
+    if not text.isdigit():
+        await update.message.reply_text(
+            "❌ آیدی باید فقط عدد باشد. دوباره ارسال کنید:\n\n⚠️ /cancel برای انصراف"
+        )
+        return ADMIN_MANUAL_SUB_USER_ID
+
+    target_user_id = int(text)
+    target_user = db.get_user(target_user_id)
+    if not target_user:
+        await update.message.reply_text(
+            "❌ کاربری با این آیدی پیدا نشد.\n\n"
+            "آیدی دیگری بفرستید یا /cancel کنید."
+        )
+        return ADMIN_MANUAL_SUB_USER_ID
+
+    context.user_data['manual_sub_target'] = target_user_id
+    await update.message.reply_text(
+        "📦 لطفاً طرح مورد نظر را انتخاب کنید:",
+        reply_markup=_plan_preset_keyboard()
+    )
+    return ADMIN_MANUAL_SUB_PLAN_NAME
+
+
+async def admin_manual_sub_plan_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id):
+        return ConversationHandler.END
+
+    data = query.data
+    if data == "admin_manual_plan_other":
+        await query.edit_message_text("✏️ لطفاً نام طرح دلخواه را تایپ کنید:")
+        return ADMIN_MANUAL_SUB_PLAN_NAME
+
+    key = data.replace("admin_manual_plan_", "")
+    plan_name = MANUAL_PLAN_PRESETS.get(key, key)
+    context.user_data['manual_sub_plan_name'] = plan_name
+
+    await query.edit_message_text(
+        f"✅ طرح انتخاب شد: {plan_name}\n\n"
+        f"📅 لطفاً اعتبار اشتراک را وارد کنید:\n"
+        f"- یا تعداد روز (مثال: 30)\n"
+        f"- یا تاریخ دقیق انقضا به فرمت YYYY-MM-DD (مثال: 2026-08-20)\n\n"
+        f"⚠️ /cancel برای انصراف"
+    )
+    return ADMIN_MANUAL_SUB_EXPIRY
+
+
+async def admin_manual_sub_plan_name_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    if text == "/cancel":
+        await update.message.reply_text("❌ Operation cancelled.", reply_markup=get_main_menu())
+        return ConversationHandler.END
+
+    if not text:
+        await update.message.reply_text("❌ نام طرح نمی‌تواند خالی باشد. دوباره وارد کنید:")
+        return ADMIN_MANUAL_SUB_PLAN_NAME
+
+    context.user_data['manual_sub_plan_name'] = text
+    await update.message.reply_text(
+        f"✅ طرح: {text}\n\n"
+        f"📅 لطفاً اعتبار اشتراک را وارد کنید:\n"
+        f"- یا تعداد روز (مثال: 30)\n"
+        f"- یا تاریخ دقیق انقضا به فرمت YYYY-MM-DD\n\n"
+        f"⚠️ /cancel برای انصراف"
+    )
+    return ADMIN_MANUAL_SUB_EXPIRY
+
+async def admin_manual_sub_expiry_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    if text == "/cancel":
+        await update.message.reply_text("❌ Operation cancelled.", reply_markup=get_main_menu())
+        return ConversationHandler.END
+
+    duration_days = None
+    if text.isdigit():
+        duration_days = int(text)
+        if duration_days < 1:
+            await update.message.reply_text("❌ تعداد روز باید حداقل ۱ باشد. دوباره وارد کنید:")
+            return ADMIN_MANUAL_SUB_EXPIRY
+    else:
+        try:
+            expiry_date = datetime.strptime(text, "%Y-%m-%d")
+            duration_days = (expiry_date - datetime.now()).days
+            if duration_days < 1:
+                await update.message.reply_text(
+                    "❌ تاریخ انقضا باید در آینده باشد. دوباره وارد کنید:"
+                )
+                return ADMIN_MANUAL_SUB_EXPIRY
+        except ValueError:
+            await update.message.reply_text(
+                "❌ فرمت نامعتبر است.\n"
+                "یا عدد روز (مثال: 30) یا تاریخ YYYY-MM-DD وارد کنید:"
+            )
+            return ADMIN_MANUAL_SUB_EXPIRY
+
+    context.user_data['manual_sub_duration'] = duration_days
+
+    # ============ درخواست حجم (جدید) ============
+    await update.message.reply_text(
+        "📊 لطفاً حجم این اشتراک را به گیگابایت وارد کنید:\n"
+        "مثال: 50\n\n"
+        "⚠️ برای نامحدود، عدد 0 را وارد کنید.\n"
+        "⚠️ /cancel برای انصراف"
+    )
+    return ADMIN_MANUAL_SUB_VOLUME
+
+async def admin_manual_sub_volume_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """دریافت مقدار حجم (GB) برای اشتراک دستی"""
+    text = update.message.text.strip()
+    if text == "/cancel":
+        await update.message.reply_text("❌ Operation cancelled.", reply_markup=get_main_menu())
+        for key in ('manual_sub_target', 'manual_sub_plan_name', 'manual_sub_duration'):
+            context.user_data.pop(key, None)
+        return ConversationHandler.END
+
+    try:
+        volume = int(text)
+        if volume < 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text(
+            "❌ لطفاً یک عدد صحیح (گیگابایت) وارد کنید (برای نامحدود 0 بزنید):"
+        )
+        return ADMIN_MANUAL_SUB_VOLUME
+
+    context.user_data['manual_sub_volume'] = volume
+
+    await update.message.reply_text(
+        "🔢 لطفاً اولویت کانفیگ‌هایی که الان وارد می‌کنید را انتخاب کنید:",
+        reply_markup=_priority_keyboard("admin_manual_priority")
+    )
+    return ADMIN_MANUAL_SUB_PRIORITY
+
+async def admin_manual_sub_priority_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id):
+        return ConversationHandler.END
+
+    priority = int(query.data.replace("admin_manual_priority_", ""))
+    context.user_data['manual_sub_priority'] = priority
+
+    await query.edit_message_text(
+        "🔧 لطفاً کانفیگ(های) این اشتراک را ارسال کنید.\n"
+        "می‌توانید چند کانفیگ بفرستید؛ هرکدام در یک خط جداگانه.\n\n"
+        "مثال:\nvless://...\nvless://...\n\n"
+        "⚠️ /cancel برای انصراف"
+    )
+    return ADMIN_MANUAL_SUB_CONFIG
+
+
+async def admin_manual_sub_config_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    if text == "/cancel":
+        await update.message.reply_text("❌ Operation cancelled.", reply_markup=get_main_menu())
+        context.user_data.pop('manual_sub_target', None)
+        context.user_data.pop('manual_sub_plan_name', None)
+        context.user_data.pop('manual_sub_duration', None)
+        context.user_data.pop('manual_sub_priority', None)
+        context.user_data.pop('manual_sub_volume', None)   # <-- جدید
+        return ConversationHandler.END
+
+    links = [l.strip() for l in text.split('\n') if l.strip()]
+    if not links:
+        await update.message.reply_text("❌ حداقل یک کانفیگ وارد کنید:")
+        return ADMIN_MANUAL_SUB_CONFIG
+
+    target_user_id = context.user_data.get('manual_sub_target')
+    plan_name = context.user_data.get('manual_sub_plan_name')
+    duration_days = context.user_data.get('manual_sub_duration', 30)
+    volume = context.user_data.get('manual_sub_volume', 0)
+    priority = context.user_data.get('manual_sub_priority', 1)
+
+    if not target_user_id or not plan_name:
+        await update.message.reply_text("❌ خطا! لطفاً دوباره تلاش کنید.", reply_markup=get_main_menu())
+        return ConversationHandler.END
+
+    email = f"manual_{target_user_id}_{int(datetime.now().timestamp())}"
+    subscription_id = db.add_subscription(
+        user_id=target_user_id,
+        protocol='v2ray',
+        duration_days=duration_days,
+        plan_type='manual',
+        initial_volume=volume,
+        plan_name=plan_name,
+        email=email,
+        panel_id=None
+    )
+
+    if not subscription_id:
+        await update.message.reply_text("❌ خطا در ثبت اشتراک. لطفاً دوباره تلاش کنید.", reply_markup=get_main_menu())
+        return ConversationHandler.END
+
+    for link in links:
+        db.add_manual_config(subscription_id, link, priority)
+
+    admin = update.effective_user
+    try:
+        from logger_bot import log_admin_action
+        await log_admin_action(
+            context.bot,
+            admin_id=admin.id,
+            action="افزودن اشتراک دستی",
+            target_user_id=target_user_id,
+            details=(
+                f"📦 طرح: {plan_name}\n"
+                f"⏰ مدت: {duration_days} روز\n"
+                f"🔢 اولویت: {priority}\n"
+                f"🔗 تعداد کانفیگ: {len(links)}"
+            ),
+            username=admin.username,
+            first_name=admin.first_name,
+            last_name=admin.last_name
+        )
+    except Exception as e:
+        logger.error(f"Error logging admin action: {e}")
+
+    await update.message.reply_text(
+        f"✅ اشتراک دستی با موفقیت ثبت شد!\n\n"
+        f"👤 کاربر: <code>{target_user_id}</code>\n"
+        f"📦 طرح: {plan_name}\n"
+        f"⏰ مدت: {duration_days} روز\n"
+        f"📊 حجم: {'نامحدود' if volume == 0 else f'{volume} گیگ'}\n"
+        f"🔢 تعداد کانفیگ: {len(links)}",
+        parse_mode='HTML',
+        reply_markup=get_main_menu()
+    )
+    
+    try:
+        await context.bot.send_message(
+            chat_id=target_user_id,
+            text=(
+                f"🎉 یک اشتراک جدید برای شما توسط پشتیبانی ثبت شد!\n\n"
+                f"📦 طرح: {plan_name}\n"
+                f"⏰ مدت: {duration_days} روز\n"
+                f"📊 حجم: {'نامحدود' if volume == 0 else f'{volume} گیگ'}\n\n"
+                f"برای دریافت کانفیگ به بخش «📒 اشتراک ها» مراجعه کنید."
+            )
+        )
+    except Exception as e:
+        logger.error(f"Could not notify user {target_user_id}: {e}")
+
+    for key in ('manual_sub_target', 'manual_sub_plan_name', 'manual_sub_duration',
+                'manual_sub_priority', 'manual_sub_volume'):
+        context.user_data.pop(key, None)
+
+    return ConversationHandler.END
+
+
+# ============ Admin: Add Config to Existing Subscription ============
+
+async def admin_addconfig_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id):
+        await query.edit_message_text("⛔️ You do not have admin access.")
+        return ConversationHandler.END
+
+    await query.edit_message_text(
+        "➕ افزودن کانفیگ به اشتراک موجود\n\n"
+        "👤 لطفاً آیدی عددی کاربر را ارسال کنید:\n\n"
+        "⚠️ برای انصراف /cancel بفرستید."
+    )
+    return ADMIN_ADDCONFIG_USER_ID
+
+
+async def admin_addconfig_user_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    if text == "/cancel":
+        await update.message.reply_text("❌ Operation cancelled.", reply_markup=get_main_menu())
+        return ConversationHandler.END
+
+    if not text.isdigit():
+        await update.message.reply_text(
+            "❌ آیدی باید فقط عدد باشد. دوباره ارسال کنید:\n\n⚠️ /cancel برای انصراف"
+        )
+        return ADMIN_ADDCONFIG_USER_ID
+
+    target_user_id = int(text)
+    target_user = db.get_user(target_user_id)
+    if not target_user:
+        await update.message.reply_text(
+            "❌ کاربری با این آیدی پیدا نشد.\n\nآیدی دیگری بفرستید یا /cancel کنید."
+        )
+        return ADMIN_ADDCONFIG_USER_ID
+
+    subs = db.get_active_subscriptions(target_user_id)
+    if not subs:
+        await update.message.reply_text(
+            "ℹ️ این کاربر هیچ اشتراک فعالی ندارد.",
+            reply_markup=get_main_menu()
+        )
+        return ConversationHandler.END
+
+    context.user_data['addconfig_target'] = target_user_id
+    context.user_data['addconfig_subs'] = subs
+
+    keyboard = []
+    lines = [f"👤 اشتراک‌های فعال کاربر <code>{target_user_id}</code>:\n"]
+    for i, sub in enumerate(subs):
+        label = sub.get('plan_name') or sub.get('email') or f"#{sub['id']}"
+        lines.append(f"{i+1}. {label} - تا {str(sub.get('end_date'))[:10]}")
+        keyboard.append([InlineKeyboardButton(f"{i+1}. {label}", callback_data=f"admin_addconfig_sub_{i}")])
+
+    await update.message.reply_text(
+        "\n".join(lines),
+        parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return ADMIN_ADDCONFIG_SELECT_SUB
+
+
+async def admin_addconfig_select_sub(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id):
+        return ConversationHandler.END
+
+    idx = int(query.data.replace("admin_addconfig_sub_", ""))
+    subs = context.user_data.get('addconfig_subs', [])
+    if idx >= len(subs):
+        await query.edit_message_text("❌ این مورد دیگر معتبر نیست.")
+        return ConversationHandler.END
+
+    sub = subs[idx]
+    context.user_data['addconfig_sub_id'] = sub['id']
+
+    await query.edit_message_text(
+        "🔢 لطفاً اولویت کانفیگ‌هایی که الان اضافه می‌کنید را انتخاب کنید:",
+        reply_markup=_priority_keyboard("admin_addconfig_priority")
+    )
+    return ADMIN_ADDCONFIG_PRIORITY
+
+
+async def admin_addconfig_priority_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id):
+        return ConversationHandler.END
+
+    priority = int(query.data.replace("admin_addconfig_priority_", ""))
+    context.user_data['addconfig_priority'] = priority
+
+    await query.edit_message_text(
+        "🔧 لطفاً کانفیگ(های) جدید را ارسال کنید.\n"
+        "می‌توانید چند کانفیگ بفرستید؛ هرکدام در یک خط جداگانه.\n\n"
+        "⚠️ /cancel برای انصراف"
+    )
+    return ADMIN_ADDCONFIG_LINK
+
+
+async def admin_addconfig_link_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    if text == "/cancel":
+        await update.message.reply_text("❌ Operation cancelled.", reply_markup=get_main_menu())
+        for key in ('addconfig_target', 'addconfig_subs', 'addconfig_sub_id', 'addconfig_priority'):
+            context.user_data.pop(key, None)
+        return ConversationHandler.END
+
+    links = [l.strip() for l in text.split('\n') if l.strip()]
+    if not links:
+        await update.message.reply_text("❌ حداقل یک کانفیگ وارد کنید:")
+        return ADMIN_ADDCONFIG_LINK
+
+    sub_id = context.user_data.get('addconfig_sub_id')
+    priority = context.user_data.get('addconfig_priority', 1)
+    target_user_id = context.user_data.get('addconfig_target')
+
+    if not sub_id:
+        await update.message.reply_text("❌ خطا! لطفاً دوباره تلاش کنید.", reply_markup=get_main_menu())
+        return ConversationHandler.END
+
+    for link in links:
+        db.add_manual_config(sub_id, link, priority)
+
+    admin = update.effective_user
+    try:
+        from logger_bot import log_admin_action
+        await log_admin_action(
+            context.bot,
+            admin_id=admin.id,
+            action="افزودن کانفیگ به اشتراک",
+            target_user_id=target_user_id,
+            details=f"🆔 اشتراک: {sub_id}\n🔢 اولویت: {priority}\n🔗 تعداد کانفیگ: {len(links)}",
+            username=admin.username,
+            first_name=admin.first_name,
+            last_name=admin.last_name
+        )
+    except Exception as e:
+        logger.error(f"Error logging admin action: {e}")
+
+    await update.message.reply_text(
+        f"✅ {len(links)} کانفیگ با موفقیت به اشتراک اضافه شد.",
+        reply_markup=get_main_menu()
+    )
+
+    if target_user_id:
+        try:
+            await context.bot.send_message(
+                chat_id=target_user_id,
+                text="🎉 کانفیگ جدیدی به یکی از اشتراک‌های شما اضافه شد. از بخش «📒 اشتراک ها» دریافت کنید."
+            )
+        except Exception as e:
+            logger.error(f"Could not notify user {target_user_id}: {e}")
+
+    for key in ('addconfig_target', 'addconfig_subs', 'addconfig_sub_id', 'addconfig_priority'):
+        context.user_data.pop(key, None)
+
     return ConversationHandler.END
