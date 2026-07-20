@@ -394,7 +394,24 @@ class Database:
         finally:
             if cursor:
                 cursor.close()
-    
+
+    def get_expired_subscriptions_by_type(self, plan_type: str):
+        """اشتراک‌های یک plan_type خاص که منقضی شده‌اند ولی هنوز status='active' دارند"""
+        cursor = None
+        try:
+            cursor = self.get_cursor()
+            cursor.execute(
+                "SELECT * FROM subscriptions WHERE plan_type = %s AND status = 'active' AND end_date <= NOW()",
+                (plan_type,)
+            )
+            return cursor.fetchall()
+        except Exception as e:
+            logger.error(f"Error getting expired subscriptions by type: {e}")
+            return []
+        finally:
+            if cursor:
+                cursor.close()
+                
     def get_inactive_subscriptions_count(self, user_id: int):
         """Get count of inactive subscriptions"""
         cursor = None
@@ -892,6 +909,40 @@ class Database:
             if cursor:
                 cursor.close()
 
+    def get_active_subscriptions_count(self) -> int:
+        """تعداد کل اشتراک‌های فعال (بدون نیاز به ستون یا جدول جدید)"""
+        cursor = None
+        try:
+            cursor = self.get_cursor()
+            cursor.execute(
+                "SELECT COUNT(*) as count FROM subscriptions WHERE status = 'active' AND end_date > NOW()"
+            )
+            row = cursor.fetchone()
+            return row['count'] if row else 0
+        except Exception as e:
+            logger.error(f"Error counting active subscriptions: {e}")
+            return 0
+        finally:
+            if cursor:
+                cursor.close()
+
+    def get_emergency_members_count(self) -> int:
+        """تعداد کاربرانی که دسترسی طرح اضطراری تاییدشده دارند (از همان جدول emergency_access)"""
+        cursor = None
+        try:
+            cursor = self.get_cursor()
+            cursor.execute(
+                "SELECT COUNT(*) as count FROM emergency_access WHERE status = 'approved'"
+            )
+            row = cursor.fetchone()
+            return row['count'] if row else 0
+        except Exception as e:
+            logger.error(f"Error counting emergency members: {e}")
+            return 0
+        finally:
+            if cursor:
+                cursor.close()
+                
     # ============ Sub Token Methods ============
     def get_or_create_sub_token(self, user_id: int):
         """توکن یکتای «اشتراک یکپارچه» کاربر را برمی‌گرداند؛ اگر نداشت می‌سازد"""
@@ -949,6 +1000,80 @@ class Database:
             if cursor:
                 cursor.close()                
 
+    def _ensure_subscription_link_tokens_table(self):
+        """جدول نگه‌داری توکن لینک اختصاصی هر subscription را در صورت نبود می‌سازد"""
+        cursor = None
+        try:
+            cursor = self.get_cursor()
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS subscription_link_tokens (
+                    subscription_id INTEGER PRIMARY KEY,
+                    token VARCHAR(64) UNIQUE NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (subscription_id) REFERENCES subscriptions(id) ON DELETE CASCADE
+                )
+            """)
+            self.conn.commit()
+        except Exception as e:
+            logger.error(f"Error creating subscription_link_tokens table: {e}")
+            if self.conn:
+                self.conn.rollback()
+        finally:
+            if cursor:
+                cursor.close()
+
+    def get_or_create_subscription_link_token(self, subscription_id: int):
+        """توکن لینک اختصاصی یک subscription خاص را برمی‌گرداند؛ اگر نداشت می‌سازد"""
+        cursor = None
+        try:
+            self._ensure_subscription_link_tokens_table()
+            cursor = self.get_cursor()
+            cursor.execute(
+                "SELECT token FROM subscription_link_tokens WHERE subscription_id = %s",
+                (subscription_id,)
+            )
+            row = cursor.fetchone()
+            if row and row.get('token'):
+                return row['token']
+
+            token = secrets.token_hex(16)
+            cursor.execute(
+                "INSERT INTO subscription_link_tokens (subscription_id, token) VALUES (%s, %s) "
+                "ON CONFLICT (subscription_id) DO UPDATE SET token = EXCLUDED.token "
+                "RETURNING token",
+                (subscription_id, token)
+            )
+            result = cursor.fetchone()
+            self.conn.commit()
+            return result['token'] if result else token
+        except Exception as e:
+            logger.error(f"Error getting/creating subscription link token: {e}")
+            if self.conn:
+                self.conn.rollback()
+            return None
+        finally:
+            if cursor:
+                cursor.close()
+
+    def get_subscription_id_by_link_token(self, token: str):
+        """پیدا کردن subscription_id از روی توکن لینک اختصاصی"""
+        cursor = None
+        try:
+            self._ensure_subscription_link_tokens_table()
+            cursor = self.get_cursor()
+            cursor.execute(
+                "SELECT subscription_id FROM subscription_link_tokens WHERE token = %s",
+                (token,)
+            )
+            row = cursor.fetchone()
+            return row['subscription_id'] if row else None
+        except Exception as e:
+            logger.error(f"Error getting subscription by link token: {e}")
+            return None
+        finally:
+            if cursor:
+                cursor.close()
+
     def get_lifeline(self):
         cursor = None
         try:
@@ -975,7 +1100,7 @@ class Database:
         cursor = None
         try:
             cursor = self.get_cursor()
-            self.get_lifeline()  # مطمئن شو رکورد وجود دارد
+            self.get_lifeline()
             if max_days is not None:
                 cursor.execute(
                     "UPDATE bot_lifeline SET days_remaining = GREATEST(0, LEAST(%s, days_remaining + %s)), "
