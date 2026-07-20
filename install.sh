@@ -120,24 +120,61 @@ setup_database(){
     read -rp "Database username [cbu_user]: " DB_USER
     DB_USER=${DB_USER:-cbu_user}
 
+    DB_HOST="localhost"
+    DB_PORT="5432"
+
+    # ---- Check for existing role/database ----
+    ROLE_EXISTS=$(sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='${DB_USER}'")
+    DB_EXISTS=$(sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'")
+
+    if [[ "$ROLE_EXISTS" == "1" || "$DB_EXISTS" == "1" ]]; then
+      warn "User «${DB_USER}» or database «${DB_NAME}» already exists on this server."
+      echo "  1) Use the existing database/user (no password change)"
+      echo "  2) Reset password for the existing user"
+      echo "  3) Enter a new username/database (create a new set)"
+      read -rp "Your choice [1]: " DB_EXIST_CHOICE
+      DB_EXIST_CHOICE=${DB_EXIST_CHOICE:-1}
+
+      case "$DB_EXIST_CHOICE" in
+        1)
+          DB_PASS=""
+          while [[ -z "$DB_PASS" ]]; do
+            read -rsp "Enter the current password for «${DB_USER}» (only for saving in config.json, nothing will change in the database): " DB_PASS
+            echo
+          done
+          ok "Using existing database/user; no password was changed."
+          return
+          ;;
+        2)
+          DB_PASS=""
+          while [[ -z "$DB_PASS" ]]; do
+            read -rsp "New password for user «${DB_USER}»: " DB_PASS
+            echo
+          done
+          sudo -u postgres psql -c "ALTER ROLE ${DB_USER} WITH PASSWORD '${DB_PASS}';" >/dev/null
+          [[ "$DB_EXISTS" != "1" ]] && sudo -u postgres psql -c "CREATE DATABASE ${DB_NAME} OWNER ${DB_USER};"
+          sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE ${DB_NAME} TO ${DB_USER};" >/dev/null
+          ok "Password has been updated."
+          return
+          ;;
+        3)
+          setup_database   # Start over with new names
+          return
+          ;;
+      esac
+    fi
+
+    # ---- Normal path: nothing exists yet ----
     DB_PASS=""
     while [[ -z "$DB_PASS" ]]; do
       read -rsp "Password for database user (required): " DB_PASS
       echo
     done
 
-    DB_HOST="localhost"
-    DB_PORT="5432"
-
     info "Creating user and database in PostgreSQL..."
-    sudo -u postgres psql -tc "SELECT 1 FROM pg_roles WHERE rolname='${DB_USER}'" | grep -q 1 \
-      || sudo -u postgres psql -c "CREATE ROLE ${DB_USER} LOGIN PASSWORD '${DB_PASS}';"
-    sudo -u postgres psql -c "ALTER ROLE ${DB_USER} WITH PASSWORD '${DB_PASS}';" >/dev/null
-
-    sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'" | grep -q 1 \
-      || sudo -u postgres psql -c "CREATE DATABASE ${DB_NAME} OWNER ${DB_USER};"
+    sudo -u postgres psql -c "CREATE ROLE ${DB_USER} LOGIN PASSWORD '${DB_PASS}';"
+    sudo -u postgres psql -c "CREATE DATABASE ${DB_NAME} OWNER ${DB_USER};"
     sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE ${DB_NAME} TO ${DB_USER};" >/dev/null
-
     ok "Database «${DB_NAME}» and user «${DB_USER}» have been created."
   else
     info "Please enter existing database connection details:"
