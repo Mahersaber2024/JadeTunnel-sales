@@ -111,11 +111,17 @@ class PanelClient:
             expiry_time = int((datetime.now() + timedelta(days=expiry_days)).timestamp() * 1000)
         else:
             expiry_time = 0
-        
+
+        # ============ تبدیل گیگابایت به بایت ============
+        # فیلد totalGB در API پنل 3xUI در واقع "بایت" می‌گیرد نه گیگابایت.
+        # اگر همین‌جا تبدیل نشود، مقدار وارد شده (مثلاً 10) به‌عنوان 10 بایت ثبت می‌شود
+        # نه 10 گیگابایت — که باعث می‌شود کلاینت عملاً بلافاصله به سقف حجم برسد.
+        total_bytes = int(total_gb * 1024 * 1024 * 1024) if total_gb else 0
+
         payload = {
             "client": {
                 "email": email,
-                "totalGB": total_gb,
+                "totalGB": total_bytes,
                 "expiryTime": expiry_time,
                 "tgId": 0,
                 "limitIp": limit_ip,
@@ -129,13 +135,8 @@ class PanelClient:
         url = f"{self.panel_base}/panel/api/clients/add"
         try:
             response = self.session.post(
-                url,
-                json=payload,
-                headers=self._get_headers(),
-                verify=False,
-                timeout=30
+                url, json=payload, headers=self._get_headers(), verify=False, timeout=30
             )
-            
             response.raise_for_status()
             result = response.json()
             
@@ -145,7 +146,6 @@ class PanelClient:
                 return True, result.get('msg', 'Client created'), client_data
             else:
                 return False, result.get('msg', 'Unknown error from panel'), None
-                
         except Exception as e:
             error_msg = f"Error creating client: {e}"
             logger.error(error_msg)
@@ -220,41 +220,34 @@ class PanelClient:
 
     # ====================== تابع جدید برای افزایش حجم ======================
     def update_client_volume(self, email: str, new_total_gb):
-        """
-        ست کردن مستقیم حجم کل کلاینت در پنل با مقدار محاسبه‌شده در دیتابیس.
-
-        توجه: جمع زدن حجم قبلی + جدید باید قبلاً در دیتابیس انجام شده باشد
-        (توسط db.add_volume_to_subscription). این تابع دیگر حجم فعلی را
-        از پنل نمی‌خواند و صرفاً مقدار کل نهایی را که از بیرون (دیتابیس)
-        دریافت می‌کند روی پنل ست می‌کند.
-
-        Args:
-            email: ایمیل کاربر (شناسه یکتا)
-            new_total_gb: حجم کل جدید (از دیتابیس، نه دلتای اضافه‌شده)
-
-        Returns:
-            (success, message, new_total_gb)
-        """
         if not self._ensure_session():
             return False, "Failed to authenticate with panel", None
-
-        # فقط برای فیلدهای دیگری که پنل برای آپدیت لازم دارد (expiryTime, tgId, enable)
+ 
         client_info = self.get_client_info(email)
         if not client_info:
             return False, f"Client with email '{email}' not found in panel", None
-
-        logger.info(f"Updating client {email}: setting totalGB directly to {new_total_gb}GB (from DB)")
-
+ 
+        # ============ تبدیل صریح به int (جلوگیری از خطای Decimal is not JSON serializable) ============
+        new_total_gb = int(new_total_gb)
+ 
+        # ============ تبدیل گیگابایت به بایت (همانند create_client) ============
+        # فیلد totalGB در API پنل 3xUI در واقع "بایت" می‌گیرد نه گیگابایت.
+        # قبلاً این تبدیل انجام نمی‌شد و مقدار گیگابایت مستقیماً به‌عنوان بایت
+        # ارسال می‌شد (مثلاً 5 -> 5 بایت به‌جای 5 گیگابایت).
+        new_total_bytes = int(new_total_gb * 1024 * 1024 * 1024) if new_total_gb else 0
+ 
+        logger.info(f"Updating client {email}: setting totalGB to {new_total_gb}GB ({new_total_bytes} bytes, from DB)")
+ 
         payload = {
             "email": email,
-            "totalGB": new_total_gb,
-            "expiryTime": client_info.get('expiryTime', 0),
+            "totalGB": new_total_bytes,
+            "expiryTime": int(client_info.get('expiryTime', 0) or 0),
             "tgId": client_info.get('tgId', 0),
             "enable": client_info.get('enable', True)
         }
-
+ 
         url = f"{self.panel_base}/panel/api/clients/update/{email}"
-
+ 
         try:
             response = self.session.post(
                 url,
@@ -263,19 +256,41 @@ class PanelClient:
                 verify=False,
                 timeout=30
             )
-
+ 
             response.raise_for_status()
             result = response.json()
-
+ 
             if result.get('success', False):
                 return True, f"حجم کل کاربر روی پنل به {new_total_gb}GB بروزرسانی شد", new_total_gb
             else:
                 return False, result.get('msg', 'خطا در آپدیت کاربر'), None
-
+ 
         except Exception as e:
             logger.error(f"Error updating volume for {email}: {e}")
             return False, str(e), None
 
+    # ====================== ریست ترافیک روزانه (پلن‌های سقف‌دار) ======================
+    def reset_client_traffic(self, email: str):
+        """
+        ریست شمارنده‌ی مصرف (up/down) یک کلاینت — totalGB (سقف کلی) دست‌نخورده می‌ماند.
+        برای پلن‌های سقف‌دار روزانه (متعادل/منصفانه/حرفه‌ای) استفاده می‌شود.
+        Returns: (success: bool, message: str)
+        """
+        if not self._ensure_session():
+            return False, "Failed to authenticate with panel"
+
+        url = f"{self.panel_base}/panel/api/clients/resetTraffic/{email}"
+        try:
+            response = self.session.post(
+                url, headers=self._get_headers(), verify=False, timeout=15
+            )
+            response.raise_for_status()
+            result = response.json()
+            return result.get('success', False), result.get('msg', '')
+        except Exception as e:
+            logger.error(f"Error resetting traffic for {email}: {e}")
+            return False, str(e)
+        
 class PanelClientFactory:
     """Factory for creating panel clients"""
     
@@ -312,6 +327,7 @@ class PanelClientFactory:
                 'enabled': panel.get('enabled', True)
             }
         return result
+
 
 def get_panel_client(panel_id: str = None) -> PanelClient:
     """Get a fresh panel client instance (no stale caching)"""
