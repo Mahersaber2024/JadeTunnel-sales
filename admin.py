@@ -47,6 +47,8 @@ ADMIN_ADDCONFIG_SELECT_SUB = 28
 ADMIN_ADDCONFIG_PRIORITY = 29
 ADMIN_ADDCONFIG_LINK = 30
 ADMIN_MANUAL_SUB_VOLUME = 31
+ADMIN_EMERGENCY_VOLUME_INPUT = 32     # <-- جدید
+ADMIN_EMERGENCY_DURATION_INPUT = 33   # <-- جدید
 
 MANUAL_PLAN_PRESETS = {
     'balanced': '🟢 متعادل',
@@ -55,6 +57,22 @@ MANUAL_PLAN_PRESETS = {
     'old': '📦 نامحدود تک کاربر',
     'customcharge': '🔥 طرح شارژ دلخواه',
 }
+
+import re
+import hashlib
+
+def _slugify_plan_name(plan_name: str) -> str:
+    """
+    نام طرح را به یک شناسه‌ی کوتاه و ASCII-safe تبدیل می‌کند تا در email/config id استفاده شود.
+    اگر نام طرح شامل حروف انگلیسی/عدد باشد همان را (بدون فاصله و ایموجی) برمی‌گرداند.
+    اگر نام طرح فارسی یا غیر ASCII باشد، یک هش کوتاه و ثابت (deterministic) تولید می‌کند
+    تا برای یک نام طرح مشخص همیشه یک مقدار یکسان ساخته شود.
+    """
+    ascii_only = re.sub(r'[^A-Za-z0-9]+', '', plan_name or '')
+    if ascii_only:
+        return ascii_only.lower()[:20]
+    digest = hashlib.md5((plan_name or '').encode('utf-8')).hexdigest()[:8]
+    return f"plan{digest}"
 
 from bot_settings import (
     get_sponsor_channel,
@@ -83,6 +101,8 @@ from bot_settings import (
     set_card_holder,          # <-- جدید
     get_card_bank,            # <-- جدید
     set_card_bank,            # <-- جدید
+    is_lifeline_enabled,
+    set_lifeline_enabled,
 )
 
 # Global references
@@ -141,30 +161,49 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     keyboard = [
-        [InlineKeyboardButton("👤 User Management", callback_data="admin_user_management")],
-        [InlineKeyboardButton("🖥 Manage Panels", callback_data="panel_manage")],
-        [InlineKeyboardButton("📢 Sponsor Channel Settings", callback_data="admin_channel_settings")],
-        [InlineKeyboardButton("☎️ Support Address Settings", callback_data="admin_support_settings")],
-        [InlineKeyboardButton("🎁 Gift & Bonus Settings", callback_data="admin_bonus_settings")],
-        [InlineKeyboardButton("💳 Payment Settings", callback_data="admin_payment_settings")],   # <-- جدید
-        [InlineKeyboardButton("🆘 Emergency Management", callback_data="admin_emergency_settings")],
+        [
+            InlineKeyboardButton("👤 User Management", callback_data="admin_user_management"),
+            InlineKeyboardButton("🖥 Manage Panels", callback_data="panel_manage"),
+        ],
+        [
+            InlineKeyboardButton("📢 Sponsor Channel Settings", callback_data="admin_channel_settings"),
+            InlineKeyboardButton("☎️ Support Address Settings", callback_data="admin_support_settings"),
+        ],
+        [
+            InlineKeyboardButton("🎁 Gift & Bonus Settings", callback_data="admin_bonus_settings"),
+            InlineKeyboardButton("💳 Payment Settings", callback_data="admin_payment_settings"),
+        ],
+        [
+            InlineKeyboardButton("🆘 Emergency Management", callback_data="admin_emergency_settings"),
+            InlineKeyboardButton("🕯 Lifeline Settings", callback_data="admin_lifeline_settings"),
+        ],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-
     await update.message.reply_text(
         "🛠 Admin Panel\n\nPlease select an option:",
         reply_markup=reply_markup
     )
+
+
 def _admin_main_menu_keyboard():
     """Build the top-level admin panel keyboard (used for the back button)"""
     keyboard = [
-        [InlineKeyboardButton("👤 User Management", callback_data="admin_user_management")],
-        [InlineKeyboardButton("🖥 Manage Panels", callback_data="panel_manage")],
-        [InlineKeyboardButton("📢 Sponsor Channel Settings", callback_data="admin_channel_settings")],
-        [InlineKeyboardButton("☎️ Support Address Settings", callback_data="admin_support_settings")],
-        [InlineKeyboardButton("🎁 Gift & Bonus Settings", callback_data="admin_bonus_settings")],
-        [InlineKeyboardButton("💳 Payment Settings", callback_data="admin_payment_settings")],   # <-- جدید
-        [InlineKeyboardButton("🆘 Emergency Management", callback_data="admin_emergency_settings")],
+        [
+            InlineKeyboardButton("👤 User Management", callback_data="admin_user_management"),
+            InlineKeyboardButton("🖥 Manage Panels", callback_data="panel_manage"),
+        ],
+        [
+            InlineKeyboardButton("📢 Sponsor Channel Settings", callback_data="admin_channel_settings"),
+            InlineKeyboardButton("☎️ Support Address Settings", callback_data="admin_support_settings"),
+        ],
+        [
+            InlineKeyboardButton("🎁 Gift & Bonus Settings", callback_data="admin_bonus_settings"),
+            InlineKeyboardButton("💳 Payment Settings", callback_data="admin_payment_settings"),
+        ],
+        [
+            InlineKeyboardButton("🆘 Emergency Management", callback_data="admin_emergency_settings"),
+            InlineKeyboardButton("🕯 Lifeline Settings", callback_data="admin_lifeline_settings"),
+        ],
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -1214,7 +1253,74 @@ async def admin_channel_settings_menu(update: Update, context: ContextTypes.DEFA
     text, reply_markup = _channel_settings_text_and_keyboard()
     await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=None)
 
+def _lifeline_settings_text_and_keyboard():
+    enabled = is_lifeline_enabled()
+    status_text = "✅ روشن" if enabled else "❌ خاموش"
 
+    text = (
+        f"🕯 تنظیمات چراغ جاده تونل\n\n"
+        f"وضعیت فعلی: {status_text}\n\n"
+        f"وقتی روشن باشه، پیام «چراغ جاده تونل» در کانال ساخته/آپدیت می‌شه و "
+        f"با عضویت/خروج/خرید کاربران، روزهای باقی‌مانده تغییر می‌کنه."
+    )
+
+    keyboard = [
+        [InlineKeyboardButton(
+            "🔴 خاموش کردن" if enabled else "🟢 روشن کردن",
+            callback_data="admin_lifeline_toggle"
+        )],
+        [InlineKeyboardButton("🔙 Back", callback_data="admin_back_to_main_menu")]
+    ]
+    return text, InlineKeyboardMarkup(keyboard)
+
+
+async def admin_lifeline_settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if not is_admin(query.from_user.id):
+        await query.edit_message_text("⛔️ You do not have admin access.")
+        return
+
+    text, reply_markup = _lifeline_settings_text_and_keyboard()
+    await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=None)
+
+
+async def admin_lifeline_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+
+    if not is_admin(query.from_user.id):
+        await query.answer("⛔️ No access.", show_alert=True)
+        return
+
+    new_value = not is_lifeline_enabled()
+    set_lifeline_enabled(new_value)
+    await query.answer("✅ وضعیت بروزرسانی شد.")
+
+    try:
+        from logger_bot import log_admin_action
+        admin = query.from_user
+        await log_admin_action(
+            context.bot,
+            admin_id=admin.id,
+            action="تغییر وضعیت چراغ جاده تونل",
+            target_user_id=None,
+            details=f"وضعیت جدید: {'روشن' if new_value else 'خاموش'}",
+            username=admin.username,
+            first_name=admin.first_name,
+            last_name=admin.last_name
+        )
+    except Exception as e:
+        logger.error(f"Error logging admin action: {e}")
+
+    # اگر همین الان روشن شد، فوراً یک بار پست/آپدیت کن
+    if new_value:
+        import lifeline
+        await lifeline.post_or_update_lifeline(context.bot)
+
+    text, reply_markup = _lifeline_settings_text_and_keyboard()
+    await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=None)
+    
 async def admin_channel_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Toggle membership requirement on/off"""
     query = update.callback_query
@@ -1246,7 +1352,6 @@ async def admin_channel_toggle(update: Update, context: ContextTypes.DEFAULT_TYP
 
     text, reply_markup = _channel_settings_text_and_keyboard()
     await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=None)
-
 
 async def admin_channel_edit_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Ask admin for the new channel username"""
@@ -2331,6 +2436,147 @@ def _emergency_proxy_text_and_keyboard():
 
     return text, InlineKeyboardMarkup(keyboard)
 
+# ============ Admin: Emergency Plan Default Volume/Duration ============
+
+def _emergency_plan_defaults_text_and_keyboard():
+    from bot_settings import get_emergency_plan_volume_gb, get_emergency_plan_duration_days
+    volume = get_emergency_plan_volume_gb()
+    duration = get_emergency_plan_duration_days()
+    text = (
+        f"⚙️ تنظیمات پیش‌فرض طرح اضطراری\n\n"
+        f"📊 حجم پیش‌فرض کانفیگ جدید: {'نامحدود' if volume == 0 else f'{volume} گیگ'}\n"
+        f"⏰ مدت اعتبار پیش‌فرض: {duration} روز\n\n"
+        f"⚠️ اشتراک اضطراری بعد از پایان این مدت به‌صورت خودکار "
+        f"هم از دیتابیس هم از پنل حذف می‌شود."
+    )
+    keyboard = [
+        [InlineKeyboardButton("✏️ ویرایش حجم", callback_data="admin_emergency_edit_volume")],
+        [InlineKeyboardButton("✏️ ویرایش مدت", callback_data="admin_emergency_edit_duration")],
+        [InlineKeyboardButton("🔙 Back", callback_data="admin_emergency_settings")]
+    ]
+    return text, InlineKeyboardMarkup(keyboard)
+
+
+async def admin_emergency_plan_settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id):
+        await query.edit_message_text("⛔️ You do not have admin access.")
+        return
+    text, reply_markup = _emergency_plan_defaults_text_and_keyboard()
+    await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=None)
+
+
+async def admin_emergency_edit_volume_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id):
+        await query.edit_message_text("⛔️ You do not have admin access.")
+        return ConversationHandler.END
+
+    from bot_settings import get_emergency_plan_volume_gb
+    current = get_emergency_plan_volume_gb()
+    await query.edit_message_text(
+        f"✏️ ویرایش حجم پیش‌فرض طرح اضطراری\n\n"
+        f"📊 مقدار فعلی: {'نامحدود' if current == 0 else f'{current} گیگ'}\n\n"
+        f"لطفاً مقدار جدید را به گیگابایت وارد کنید (برای نامحدود، 0 بزنید):\n\n"
+        f"⚠️ /cancel برای انصراف"
+    )
+    return ADMIN_EMERGENCY_VOLUME_INPUT
+
+
+async def admin_emergency_edit_volume_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    if text == "/cancel":
+        await update.message.reply_text("❌ Operation cancelled.", reply_markup=get_main_menu())
+        return ConversationHandler.END
+
+    try:
+        volume = int(text)
+        if volume < 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text(
+            "❌ لطفاً یک عدد صحیح معتبر وارد کنید (برای نامحدود 0 بزنید):"
+        )
+        return ADMIN_EMERGENCY_VOLUME_INPUT
+
+    from bot_settings import get_emergency_plan_volume_gb, set_emergency_plan_volume_gb
+    old_value = get_emergency_plan_volume_gb()
+    set_emergency_plan_volume_gb(volume)
+
+    try:
+        from logger_bot import log_admin_action
+        admin = update.effective_user
+        await log_admin_action(
+            context.bot, admin_id=admin.id, action="تغییر حجم پیش‌فرض طرح اضطراری",
+            target_user_id=None,
+            details=f"مقدار قبلی: {old_value} گیگ\nمقدار جدید: {volume} گیگ",
+            username=admin.username, first_name=admin.first_name, last_name=admin.last_name
+        )
+    except Exception as e:
+        logger.error(f"Error logging admin action: {e}")
+
+    await update.message.reply_text(
+        f"✅ حجم پیش‌فرض طرح اضطراری به {'نامحدود' if volume == 0 else f'{volume} گیگ'} تغییر کرد.",
+        reply_markup=get_main_menu()
+    )
+    return ConversationHandler.END
+
+
+async def admin_emergency_edit_duration_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id):
+        await query.edit_message_text("⛔️ You do not have admin access.")
+        return ConversationHandler.END
+
+    from bot_settings import get_emergency_plan_duration_days
+    current = get_emergency_plan_duration_days()
+    await query.edit_message_text(
+        f"✏️ ویرایش مدت پیش‌فرض طرح اضطراری\n\n"
+        f"⏰ مقدار فعلی: {current} روز\n\n"
+        f"لطفاً مقدار جدید را به روز وارد کنید:\n\n"
+        f"⚠️ /cancel برای انصراف"
+    )
+    return ADMIN_EMERGENCY_DURATION_INPUT
+
+
+async def admin_emergency_edit_duration_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    if text == "/cancel":
+        await update.message.reply_text("❌ Operation cancelled.", reply_markup=get_main_menu())
+        return ConversationHandler.END
+
+    try:
+        duration = int(text)
+        if duration < 1:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("❌ لطفاً یک عدد صحیح حداقل ۱ وارد کنید:")
+        return ADMIN_EMERGENCY_DURATION_INPUT
+
+    from bot_settings import get_emergency_plan_duration_days, set_emergency_plan_duration_days
+    old_value = get_emergency_plan_duration_days()
+    set_emergency_plan_duration_days(duration)
+
+    try:
+        from logger_bot import log_admin_action
+        admin = update.effective_user
+        await log_admin_action(
+            context.bot, admin_id=admin.id, action="تغییر مدت پیش‌فرض طرح اضطراری",
+            target_user_id=None,
+            details=f"مقدار قبلی: {old_value} روز\nمقدار جدید: {duration} روز",
+            username=admin.username, first_name=admin.first_name, last_name=admin.last_name
+        )
+    except Exception as e:
+        logger.error(f"Error logging admin action: {e}")
+
+    await update.message.reply_text(
+        f"✅ مدت پیش‌فرض طرح اضطراری به {duration} روز تغییر کرد.",
+        reply_markup=get_main_menu()
+    )
+    return ConversationHandler.END
 
 async def admin_emergency_proxy_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -2479,6 +2725,7 @@ def _emergency_settings_text_and_keyboard():
         f"✅ Users with access: {approved_count}"
     )
     keyboard = [
+        [InlineKeyboardButton("⚙️ تنظیمات پیش‌فرض (حجم/مدت)", callback_data="admin_emergency_plan_settings")],  # <-- جدید
         [InlineKeyboardButton("🌐 Proxy Management", callback_data="admin_emergency_proxy_settings")],
         [InlineKeyboardButton(f"⏳ Pending Requests ({pending_count})", callback_data="admin_emergency_pending")],
         [InlineKeyboardButton("👥 User Access Management", callback_data="admin_emergency_users_menu")],
@@ -2547,7 +2794,6 @@ async def admin_emergency_review_user(update: Update, context: ContextTypes.DEFA
         parse_mode=None
     )
 
-
 async def admin_emergency_grant(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """کار مشترک برای تایید از هر دو مسیر: هشدار pending و User Access Management"""
     query = update.callback_query
@@ -2593,6 +2839,13 @@ async def admin_emergency_grant(update: Update, context: ContextTypes.DEFAULT_TY
         )
     except Exception as e:
         logger.error(f"Could not notify user {target_user_id}: {e}")
+
+    # ============ رفرش پست چراغ با آمار جدید طرح اضطراری ============
+    try:
+        import lifeline
+        await lifeline.post_or_update_lifeline(context.bot)
+    except Exception as e:
+        logger.error(f"Error refreshing lifeline after emergency grant: {e}")
 
     await query.edit_message_text(f"✅ Access granted: {type_labels[access_type]} — user {target_user_id}")
 
@@ -2836,31 +3089,28 @@ async def admin_manual_sub_user_id(update: Update, context: ContextTypes.DEFAULT
     )
     return ADMIN_MANUAL_SUB_PLAN_NAME
 
-
-async def admin_manual_sub_plan_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    if not is_admin(query.from_user.id):
+async def admin_manual_sub_plan_name_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    if text == "/cancel":
+        await update.message.reply_text("❌ Operation cancelled.", reply_markup=get_main_menu())
         return ConversationHandler.END
 
-    data = query.data
-    if data == "admin_manual_plan_other":
-        await query.edit_message_text("✏️ لطفاً نام طرح دلخواه را تایپ کنید:")
+    if not text:
+        await update.message.reply_text("❌ نام طرح نمی‌تواند خالی باشد. دوباره وارد کنید:")
         return ADMIN_MANUAL_SUB_PLAN_NAME
 
-    key = data.replace("admin_manual_plan_", "")
-    plan_name = MANUAL_PLAN_PRESETS.get(key, key)
-    context.user_data['manual_sub_plan_name'] = plan_name
+    context.user_data['manual_sub_plan_name'] = text
+    # چون نام دلخواه ممکن است فارسی/غیر ASCII باشد، آن را به یک شناسه‌ی کوتاه و ثابت تبدیل می‌کنیم
+    context.user_data['manual_sub_plan_key'] = _slugify_plan_name(text)
 
-    await query.edit_message_text(
-        f"✅ طرح انتخاب شد: {plan_name}\n\n"
+    await update.message.reply_text(
+        f"✅ طرح: {text}\n\n"
         f"📅 لطفاً اعتبار اشتراک را وارد کنید:\n"
         f"- یا تعداد روز (مثال: 30)\n"
-        f"- یا تاریخ دقیق انقضا به فرمت YYYY-MM-DD (مثال: 2026-08-20)\n\n"
+        f"- یا تاریخ دقیق انقضا به فرمت YYYY-MM-DD\n\n"
         f"⚠️ /cancel برای انصراف"
     )
     return ADMIN_MANUAL_SUB_EXPIRY
-
 
 async def admin_manual_sub_plan_name_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
@@ -2921,12 +3171,39 @@ async def admin_manual_sub_expiry_input(update: Update, context: ContextTypes.DE
     )
     return ADMIN_MANUAL_SUB_VOLUME
 
+async def admin_manual_sub_plan_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id):
+        return ConversationHandler.END
+
+    data = query.data
+    if data == "admin_manual_plan_other":
+        await query.edit_message_text("✏️ لطفاً نام طرح دلخواه را تایپ کنید:")
+        return ADMIN_MANUAL_SUB_PLAN_NAME
+
+    key = data.replace("admin_manual_plan_", "")
+    plan_name = MANUAL_PLAN_PRESETS.get(key, key)
+    context.user_data['manual_sub_plan_name'] = plan_name
+    # کلید پریست (مثل balanced, fair, pro, ...) از قبل ASCII-safe است؛
+    # همین را به‌عنوان شناسه‌ی طرح در email استفاده می‌کنیم
+    context.user_data['manual_sub_plan_key'] = key
+
+    await query.edit_message_text(
+        f"✅ طرح انتخاب شد: {plan_name}\n\n"
+        f"📅 لطفاً اعتبار اشتراک را وارد کنید:\n"
+        f"- یا تعداد روز (مثال: 30)\n"
+        f"- یا تاریخ دقیق انقضا به فرمت YYYY-MM-DD (مثال: 2026-08-20)\n\n"
+        f"⚠️ /cancel برای انصراف"
+    )
+    return ADMIN_MANUAL_SUB_EXPIRY
+
 async def admin_manual_sub_volume_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """دریافت مقدار حجم (GB) برای اشتراک دستی"""
     text = update.message.text.strip()
     if text == "/cancel":
         await update.message.reply_text("❌ Operation cancelled.", reply_markup=get_main_menu())
-        for key in ('manual_sub_target', 'manual_sub_plan_name', 'manual_sub_duration'):
+        for key in ('manual_sub_target', 'manual_sub_plan_name', 'manual_sub_plan_key', 'manual_sub_duration'):
             context.user_data.pop(key, None)
         return ConversationHandler.END
 
@@ -2965,16 +3242,16 @@ async def admin_manual_sub_priority_selected(update: Update, context: ContextTyp
     )
     return ADMIN_MANUAL_SUB_CONFIG
 
-
 async def admin_manual_sub_config_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     if text == "/cancel":
         await update.message.reply_text("❌ Operation cancelled.", reply_markup=get_main_menu())
         context.user_data.pop('manual_sub_target', None)
         context.user_data.pop('manual_sub_plan_name', None)
+        context.user_data.pop('manual_sub_plan_key', None)   # <-- جدید
         context.user_data.pop('manual_sub_duration', None)
         context.user_data.pop('manual_sub_priority', None)
-        context.user_data.pop('manual_sub_volume', None)   # <-- جدید
+        context.user_data.pop('manual_sub_volume', None)
         return ConversationHandler.END
 
     links = [l.strip() for l in text.split('\n') if l.strip()]
@@ -2984,6 +3261,7 @@ async def admin_manual_sub_config_input(update: Update, context: ContextTypes.DE
 
     target_user_id = context.user_data.get('manual_sub_target')
     plan_name = context.user_data.get('manual_sub_plan_name')
+    plan_key = context.user_data.get('manual_sub_plan_key', 'plan')
     duration_days = context.user_data.get('manual_sub_duration', 30)
     volume = context.user_data.get('manual_sub_volume', 0)
     priority = context.user_data.get('manual_sub_priority', 1)
@@ -2992,7 +3270,10 @@ async def admin_manual_sub_config_input(update: Update, context: ContextTypes.DE
         await update.message.reply_text("❌ خطا! لطفاً دوباره تلاش کنید.", reply_markup=get_main_menu())
         return ConversationHandler.END
 
-    email = f"manual_{target_user_id}_{int(datetime.now().timestamp())}"
+    # ============ ساخت email بر اساس طرح (بدون تایم‌استمپ و بدون افشای آیدی خام کاربر در نمایش) ============
+    # نکته: چون هر کاربر فقط یک‌بار از هر طرح باید داشته باشد، این ایمیل برای
+    # (کاربر + طرح) یکتا و ثابت است؛ تلاش دوباره برای همان طرح همان email را می‌سازد.
+    email = f"manual_{target_user_id}_{plan_key}"
     subscription_id = db.add_subscription(
         user_id=target_user_id,
         protocol='v2ray',
@@ -3057,12 +3338,11 @@ async def admin_manual_sub_config_input(update: Update, context: ContextTypes.DE
     except Exception as e:
         logger.error(f"Could not notify user {target_user_id}: {e}")
 
-    for key in ('manual_sub_target', 'manual_sub_plan_name', 'manual_sub_duration',
-                'manual_sub_priority', 'manual_sub_volume'):
+    for key in ('manual_sub_target', 'manual_sub_plan_name', 'manual_sub_plan_key',
+                'manual_sub_duration', 'manual_sub_priority', 'manual_sub_volume'):
         context.user_data.pop(key, None)
 
     return ConversationHandler.END
-
 
 # ============ Admin: Add Config to Existing Subscription ============
 
