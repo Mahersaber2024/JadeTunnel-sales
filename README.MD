@@ -34,6 +34,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Mahersaber2024/JadeTunnel-sa
 ## سرویس‌های systemd
 
 ```bash
+systemctl stop sell-bot sub-api
 systemctl status sell-bot sub-api
 journalctl -u sell-bot -f
 journalctl -u sub-api -f
