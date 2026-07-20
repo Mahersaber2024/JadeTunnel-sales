@@ -313,15 +313,6 @@ class PanelClientFactory:
             }
         return result
 
-
-# ========== Factory function ==========
-# توجه: قبلاً یک نمونه‌ی PanelClient پیش‌فرض (بدون panel_id) در متغیر
-# سراسری _default_client کش می‌شد و فقط بار اول ساخته می‌شد. اگر بعداً
-# پنل پیش‌فرض عوض/اضافه می‌شد، این کلاینت قدیمی همچنان استفاده می‌شد و
-# باعث خطای "No panel configured" در سرویس‌های جدا (مثل sub_api.py)
-# می‌شد. ساخت PanelClient سبک است (فقط تنظیمات را می‌خواند؛ سشن HTTP
-# فقط هنگام نیاز واقعی/lazy باز می‌شود)، پس دیگر کش نمی‌کنیم.
-
 def get_panel_client(panel_id: str = None) -> PanelClient:
     """Get a fresh panel client instance (no stale caching)"""
     return PanelClient(panel_id)
