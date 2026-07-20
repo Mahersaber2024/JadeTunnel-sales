@@ -1,140 +1,123 @@
 #!/usr/bin/env python3
-# lifeline.py - "چراغ جاده تونل" / ماژول شمارنده‌ی معکوس عمر ربات
-#
-# منطق:
-#  - یک شمارنده‌ی «روز باقیمانده» در دیتابیس نگه‌داری می‌شود (پیش‌فرض 30 روز، سقف max_days)
-#  - با هر خرید موفق اشتراک، یک روز به عمر اضافه می‌شود (تا سقف max_days)
-#  - با خروج هر کاربر از کانال اسپانسر، یک روز از عمر کم می‌شود
-#  - یک پست (عکس + کپشن) در کانال «ادیت» می‌شود، نه اینکه هر بار پیام جدید بفرستد
-#  - اگر ادیت پیام قبلی شکست بخورد (مثلاً پیام حذف شده)، پیام جدید ساخته و آیدی‌اش ذخیره می‌شود
-#
-# نکته: این ماژول فقط یک نمایش انگیزشی/گرافیکی است و به‌خودی‌خود چیزی را قطع نمی‌کند.
-# اگر خواستید به رسیدن به صفر، رفتار واقعی (مثلاً غیرفعال کردن خرید) هم وصل شود، باید جداگانه اضافه شود.
-
-import io
-import math
 import logging
-from datetime import datetime
-
-from PIL import Image, ImageDraw, ImageFont
-from telegram import InputMediaPhoto, Bot
+from telegram import Bot
 from telegram.error import TelegramError
+from bot_settings import is_lifeline_enabled
 
 logger = logging.getLogger(__name__)
 
 db = None
 LIFELINE_CHANNEL_ID = None
 
+
 def set_db(database):
     global db
     db = database
+
 
 def set_channel(channel_id: str):
     global LIFELINE_CHANNEL_ID
     LIFELINE_CHANNEL_ID = channel_id
 
 
-FONT_PATH_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+def build_progress_bar(ratio: float, length: int = 12, filled_char="█", empty_char="░") -> str:
+    filled = int(round(ratio * length))
+    filled = max(0, min(length, filled))
+    return filled_char * filled + empty_char * (length - filled)
 
 
-def _load_font(size):
-    try:
-        return ImageFont.truetype(FONT_PATH_BOLD, size)
-    except Exception:
-        return ImageFont.load_default()
+def to_persian_digits(number) -> str:
+    if number is None:
+        return "—"
+    fa = "۰۱۲۳۴۵۶۷۸۹"
+    return "".join(fa[int(d)] if d.isdigit() else d for d in str(number))
 
-
-def generate_lifeline_image(days_remaining: int, max_days: int, pulse_phase: float = 0.0) -> io.BytesIO:
-    """گیج دایره‌ای با افکت نور نفس‌کشیدن (breathing glow) متناسب با روز باقیمانده"""
-    W, H = 1000, 1000
-    bg_top, bg_bottom = (10, 14, 25), (20, 28, 45)
-    img = Image.new("RGB", (W, H), bg_top)
-    draw = ImageDraw.Draw(img)
-
-    for y in range(H):
-        t = y / H
-        r = int(bg_top[0] + (bg_bottom[0] - bg_top[0]) * t)
-        g = int(bg_top[1] + (bg_bottom[1] - bg_top[1]) * t)
-        b = int(bg_top[2] + (bg_bottom[2] - bg_top[2]) * t)
-        draw.line([(0, y), (W, y)], fill=(r, g, b))
-
+def build_caption(
+    days_remaining: int,
+    max_days: int,
+    channel_count=None,
+    emergency_count=None,
+    active_subs_count=None,
+) -> str:
     ratio = max(0.0, min(1.0, days_remaining / max(1, max_days)))
-    if ratio > 0.5:
-        color = (60, 220, 140)   # سبز = سالم
-    elif ratio > 0.2:
-        color = (250, 180, 60)   # کهربایی = هشدار
-    else:
-        color = (235, 70, 70)    # قرمز = بحرانی
+    percent = int(round(ratio * 100))
+    bar = build_progress_bar(ratio)
 
-    cx, cy, r_outer = W // 2, H // 2 - 40, 340
-    pulse = (math.sin(pulse_phase) + 1) / 2  # 0..1 برای افکت نفس‌کشیدن
-
-    base_rgba = img.convert("RGBA")
-    glow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    gd = ImageDraw.Draw(glow)
-    for i in range(6, 0, -1):
-        glow_r = r_outer + i * 14 + int(pulse * 18)
-        alpha = max(0, 40 - i * 6)
-        gd.ellipse([cx - glow_r, cy - glow_r, cx + glow_r, cy + glow_r],
-                   outline=color + (alpha,), width=6)
-    img = Image.alpha_composite(base_rgba, glow).convert("RGB")
-    draw = ImageDraw.Draw(img)
-
-    track_w = 34
-    draw.arc([cx - r_outer, cy - r_outer, cx + r_outer, cy + r_outer], 0, 360,
-              fill=(45, 55, 75), width=track_w)
-    start_angle = -90
-    end_angle = start_angle + 360 * ratio
-    draw.arc([cx - r_outer, cy - r_outer, cx + r_outer, cy + r_outer], start_angle, end_angle,
-              fill=color, width=track_w)
-
-    font_big = _load_font(210)
-    font_small = _load_font(46)
-
-    num_text = str(max(0, days_remaining))
-    bbox = draw.textbbox((0, 0), num_text, font=font_big)
-    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-    draw.text((cx - tw / 2, cy - th / 2 - 30), num_text, font=font_big, fill=(245, 245, 250))
-
-    label = "DAYS LEFT"
-    bbox2 = draw.textbbox((0, 0), label, font=font_small)
-    lw = bbox2[2] - bbox2[0]
-    draw.text((cx - lw / 2, cy + 150), label, font=font_small, fill=(170, 180, 200))
-
-    buf = io.BytesIO()
-    buf.name = "lifeline.png"
-    img.save(buf, format="PNG")
-    buf.seek(0)
-    return buf
-
-
-def build_caption(days_remaining: int, max_days: int) -> str:
     if days_remaining <= 0:
-        return (
-            "🕯 <b>چراغ جاده تونل خاموش شد...</b>\n\n"
-            "بدون حمایت شما، جاده تونل نمی‌تونه ادامه بده.\n"
-            "با دعوت یک دوست، دوباره روشنش کن 🌿"
-        )
+        return "🕯 <b>چراغ جاده تونل خاموش شد</b>\n\nجاده تونل فعالیت خودش رو به پایان رسوند.\nممنون که در این مسیر همراه ما بودید 🙏"
 
-    urgency = ""
-    if days_remaining <= 5:
-        urgency = "🔴 <b>وضعیت بحرانی!</b>\n"
-    elif days_remaining <= 15:
-        urgency = "🟡 <b>نیاز به حمایت داری!</b>\n"
+    stats = (
+        f"👥 Channel members: {to_persian_digits(channel_count)}\n"
+        f"🆘 Emergency plan members: {to_persian_digits(emergency_count)}\n"
+        f"📦 Active subscriptions: {to_persian_digits(active_subs_count)}"
+    )
 
     return (
-        f"{urgency}"
-        f"🕯 <b>چراغ جاده تونل</b>\n\n"
-        f"⏳ <b>{days_remaining} روز</b> تا خاموشی چراغ باقی مونده...\n\n"
-        f"هر عضو جدیدی که با لینک دعوت شما بیاد و اشتراک بگیره، یک روز به عمر جاده تونل اضافه می‌کنه 🌱\n"
-        f"هر کاربری که مارو ترک کنه، از این عمر کم می‌شه 💔\n\n"
-        f"با دعوت از دوستات، چراغ جاده تونل رو روشن نگه دار!\n"
-        f"از بخش «👥 دعوت از دوستان» لینک اختصاصی خودت رو بردار 🚀"
+        f"<b>جاده تونل تصمیم داره به فعالیت خودش پایان بده.</b>\n\n"
+        
+        f"نگهداری سرورها با تعداد عضو کم بسیار سخته و ادامه دادنش بدون حمایت واقعی تقریباً غیرممکن شده. "
+        f"افزایش قیمت هم منطقی نیست چون باعث خروج بیشتر اعضا می‌شه.\n\n"
+        
+        f"❤️ <b>اگه دوست دارید جاده تونل ادامه بده، به حمایت تک‌تک‌تون نیاز داریم.</b>\n"
+        f"با <b>اشتراک‌گذاری این پیام</b> چراغ جاده تونل رو روشن نگه دارید.\n\n"
+        
+        f"ممنون که همراه ما هستید🙏\n\n"
+        f"──────────────────\n\n"
+        
+        f"🕯 <b>چراغ جاده تونل</b> ({to_persian_digits(days_remaining)} روز باقی‌مانده)\n"
+        f"<code>{bar}</code>  <b>{to_persian_digits(percent)}٪</b>\n\n"
+        
+        f"<b>📊 Live Statistics</b>\n"
+        f'<span class="tg-spoiler">{stats}</span>\n\n'
+        
+        f"🌱 عضویت جدید <code>+۱</code> روز\n"
+        f"💔 خروج <code>−۱</code> روز\n"
+        f"🛒 خرید <code>+۴</code> روز"
+    )
+
+# ============ بقیه توابع بدون تغییر ============
+
+async def _get_channel_members_count(bot: Bot):
+    if not LIFELINE_CHANNEL_ID:
+        return None
+    try:
+        return await bot.get_chat_member_count(chat_id=LIFELINE_CHANNEL_ID)
+    except TelegramError as e:
+        logger.warning(f"Lifeline: خطا در دریافت تعداد اعضای کانال: {e}")
+        return None
+
+
+def _call_db_count(*method_names):
+    if not db:
+        return None
+    for name in method_names:
+        fn = getattr(db, name, None)
+        if fn:
+            try:
+                return fn()
+            except Exception as e:
+                logger.warning(f"Lifeline: خطا در {name}: {e}")
+    return None
+
+
+def _get_emergency_members_count():
+    return _call_db_count(
+        "get_emergency_members_count",
+        "get_emergency_approved_count",
+        "count_emergency_access",
+    )
+
+
+def _get_active_subscriptions_count():
+    return _call_db_count(
+        "get_active_subscriptions_count",
+        "count_active_subscriptions",
     )
 
 
 async def post_or_update_lifeline(bot: Bot):
-    """پست گیج را در کانال ادیت می‌کند؛ اگر پیامی وجود نداشت یا ادیت شکست خورد، پیام جدید می‌فرستد"""
+    if not is_lifeline_enabled():
+        return
     if not db or not LIFELINE_CHANNEL_ID:
         logger.warning("Lifeline: db یا channel تنظیم نشده")
         return
@@ -147,16 +130,22 @@ async def post_or_update_lifeline(bot: Bot):
     max_days = row['max_days']
     message_id = row.get('message_id')
 
-    pulse_phase = (datetime.now().timestamp() % 60) / 60 * 2 * math.pi
-    photo = generate_lifeline_image(days_remaining, max_days, pulse_phase)
-    caption = build_caption(days_remaining, max_days)
+    channel_count = await _get_channel_members_count(bot)
+    emergency_count = _get_emergency_members_count()
+    active_subs_count = _get_active_subscriptions_count()
+
+    caption = build_caption(
+        days_remaining, max_days,
+        channel_count, emergency_count, active_subs_count,
+    )
 
     if message_id:
         try:
-            await bot.edit_message_media(
+            await bot.edit_message_text(
                 chat_id=LIFELINE_CHANNEL_ID,
                 message_id=message_id,
-                media=InputMediaPhoto(media=photo, caption=caption, parse_mode='HTML')
+                text=caption,
+                parse_mode='HTML'
             )
             return
         except TelegramError as e:
@@ -169,11 +158,9 @@ async def post_or_update_lifeline(bot: Bot):
             except Exception:
                 pass
 
-        photo.seek(0)
-        sent = await bot.send_photo(
+        sent = await bot.send_message(
             chat_id=LIFELINE_CHANNEL_ID,
-            photo=photo,
-            caption=caption,
+            text=caption,
             parse_mode='HTML'
         )
         db.set_lifeline_message(LIFELINE_CHANNEL_ID, sent.message_id)
@@ -182,6 +169,8 @@ async def post_or_update_lifeline(bot: Bot):
 
 
 async def add_day(bot: Bot, amount: int = 1):
+    if not is_lifeline_enabled():
+        return
     row = db.get_lifeline()
     max_days = row['max_days'] if row else 30
     db.adjust_lifeline_days(amount, max_days=max_days)
@@ -189,10 +178,11 @@ async def add_day(bot: Bot, amount: int = 1):
 
 
 async def subtract_day(bot: Bot, amount: int = 1):
+    if not is_lifeline_enabled():
+        return
     db.adjust_lifeline_days(-amount)
     await post_or_update_lifeline(bot)
 
 
 async def refresh_pulse(context):
-    """جاب دوره‌ای فقط برای افکت نفس‌کشیدن تصویر (بدون تغییر روز باقیمانده)"""
     await post_or_update_lifeline(context.bot)
