@@ -58,9 +58,7 @@ detect_python(){
 install_system_packages(){
   info "Installing system dependencies..."
   apt-get update -y
-  # نکته: fonts-dejavu-core برای رندر تصویر «چراغ جاده تونل» (lifeline.py) لازم است.
-  # بدون این فونت، PIL به فونت پیش‌فرض بی‌کیفیت خودش سقوط می‌کند (بدون کرش، ولی خروجی زشت).
-  apt-get install -y python3 python3-venv python3-pip git curl build-essential libpq-dev fonts-dejavu-core
+  apt-get install -y python3 python3-venv python3-pip git curl build-essential libpq-dev certbot
   ok "System dependencies installed."
 }
 
@@ -153,23 +151,49 @@ PYEOF
 collect_iran_host_config(){
   echo
   echo "======================================"
-  echo "     Iran Host (Subscription Proxy) Settings"
+  echo "     Iran Host Settings"
   echo "======================================"
-  echo "The subscription proxy will run on port 2053."
-  echo "You need to place index.php on your Iran host to forward requests."
-  echo ""
-  
   read -rp "Your Iran host domain (e.g. https://heysolo.ir): " IRAN_HOST_URL
   IRAN_HOST_URL=${IRAN_HOST_URL:-https://heysolo.ir}
   IRAN_HOST_URL=$(echo "$IRAN_HOST_URL" | sed 's:/*$::')
+  ok "Iran host domain saved."
+}
+
+collect_ssl_config(){
+  echo
+  echo "======================================"
+  echo "     SSL Configuration (optional)"
+  echo "======================================"
+  read -rp "Do you want to enable HTTPS for sub API? (y/n) [y]: " ENABLE_SSL
+  ENABLE_SSL=${ENABLE_SSL:-y}
   
-  read -rp "Absolute path where index.php is placed on Iran host [default: /home/heysolo/public_html/sub/]: " IRAN_HOST_PATH
-  IRAN_HOST_PATH=${IRAN_HOST_PATH:-/home/heysolo/public_html/sub/}
-  
-  read -rp "Server IP for sub_api.py (this server's public IP): " SERVER_IP
-  SERVER_IP=$(curl -s ifconfig.me || curl -s icanhazip.com || echo "127.0.0.1")
-  
-  ok "Iran host config collected."
+  if [[ "$ENABLE_SSL" =~ ^[Yy]$ ]]; then
+    read -rp "Domain for subscription API (e.g. pio.heysolo.ir): " SSL_DOMAIN
+    while [[ -z "$SSL_DOMAIN" ]]; do
+      read -rp "Domain is required: " SSL_DOMAIN
+    done
+
+    SSL_EMAIL="admin@${SSL_DOMAIN}"
+    info "Using email: $SSL_EMAIL"
+
+    SERVER_IP=$(curl -s ifconfig.me || curl -s icanhazip.com || echo "127.0.0.1")
+    info "This server's IP: $SERVER_IP"
+
+    systemctl stop nginx 2>/dev/null || true
+    if certbot certonly --standalone -d "${SSL_DOMAIN}" --non-interactive --agree-tos --register-unsafely-without-email --email "${SSL_EMAIL}"; then
+      SSL_CERT_PATH="/etc/letsencrypt/live/${SSL_DOMAIN}/fullchain.pem"
+      SSL_KEY_PATH="/etc/letsencrypt/live/${SSL_DOMAIN}/privkey.pem"
+      ok "SSL certificate obtained successfully."
+    else
+      warn "SSL certificate failed. HTTPS will be disabled."
+      SSL_CERT_PATH=""
+      SSL_KEY_PATH=""
+    fi
+    systemctl start nginx 2>/dev/null || true
+  else
+    SSL_CERT_PATH=""
+    SSL_KEY_PATH=""
+  fi
 }
 
 write_config_json(){
@@ -195,249 +219,31 @@ EOF
   ok "config.json file created (restricted access)."
 }
 
-write_bot_settings(){
-  local target="$1"
-  local combined_base_url="${IRAN_HOST_URL}"
+# ============================================================
+# ========== جایگذاری مقادیر در فایل index.php موجود ==========
+# ============================================================
+configure_index_php(){
+  local index_file="${INSTALL_DIR}/index.php"
   
-  # Update bot_settings.py with combined_sub_base_url
-  cat > "${target}/bot_settings.py" <<'EOF'
-import json
-import os
-import logging
-import json as _json
-import os as _os
+  if [[ ! -f "$index_file" ]]; then
+    warn "index.php not found at $index_file. Skipping configuration."
+    return
+  fi
 
-_EMERGENCY_PROXY_FILE = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "emergency_proxies.json")
-logger = logging.getLogger(__name__)
+  local protocol="http"
+  if [[ -n "${SSL_CERT_PATH:-}" && -n "${SSL_KEY_PATH:-}" ]]; then
+    protocol="https"
+  fi
 
-SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot_settings.json")
+  local api_base="${protocol}://${SSL_DOMAIN}:2053"
 
-DEFAULT_SETTINGS = {
-    "sponsor_channel": "@jadetunnell",
-    "sponsor_channel_title": "Jade Tunnel",
-    "membership_required": True,
-    "support_username": "@jadetunnel",
-    "signup_bonus": 30000,
-    "referral_bonus_inviter": 20000,
-    "referral_bonus_invitee": 30000,
-    "special_panel_id": None,
-    "special_panel_commission_percent": 50,
-    "hybrid_payment_enabled": False,
-    "card_number": "6219861065685272",
-    "card_holder": "وحید صابر",
-    "card_bank": "سامان",
-    "combined_sub_base_url": "https://heysolo.ir",
-}
-
-_settings_cache = None
-
-def _load():
-    global _settings_cache
-    if _settings_cache is not None:
-        return _settings_cache
-    data = {}
-    if os.path.exists(SETTINGS_FILE):
-        try:
-            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception as e:
-            logger.error(f"Error loading bot_settings.json: {e}")
-            data = {}
-    merged = {**DEFAULT_SETTINGS, **data}
-    _settings_cache = merged
-    return merged
-
-def _save(data):
-    global _settings_cache
-    with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    _settings_cache = data
-
-def get_sponsor_channel() -> str:
-    channel = _load().get("sponsor_channel", DEFAULT_SETTINGS["sponsor_channel"])
-    channel = channel.strip()
-    if not channel.startswith("@"):
-        channel = "@" + channel.lstrip("@")
-    return channel
-
-def set_sponsor_channel(channel: str):
-    channel = channel.strip()
-    if "t.me/" in channel:
-        channel = channel.split("t.me/")[-1].split("?")[0].strip("/")
-    if not channel.startswith("@"):
-        channel = "@" + channel.lstrip("@")
-    data = _load()
-    data["sponsor_channel"] = channel
-    _save(data)
-
-def get_sponsor_channel_title() -> str:
-    title = _load().get("sponsor_channel_title", DEFAULT_SETTINGS["sponsor_channel_title"])
-    return title.strip() or DEFAULT_SETTINGS["sponsor_channel_title"]
-
-def set_sponsor_channel_title(title: str):
-    title = title.strip()
-    if not title:
-        return
-    data = _load()
-    data["sponsor_channel_title"] = title
-    _save(data)
-
-def is_membership_required() -> bool:
-    return bool(_load().get("membership_required", True))
-
-def set_membership_required(value: bool):
-    data = _load()
-    data["membership_required"] = bool(value)
-    _save(data)
-
-def get_support_username() -> str:
-    username = _load().get("support_username", DEFAULT_SETTINGS["support_username"])
-    username = username.strip()
-    if not username.startswith("@"):
-        username = "@" + username.lstrip("@")
-    return username
-
-def set_support_username(username: str):
-    username = username.strip()
-    if "t.me/" in username:
-        username = username.split("t.me/")[-1].split("?")[0].strip("/")
-    if not username.startswith("@"):
-        username = "@" + username.lstrip("@")
-    data = _load()
-    data["support_username"] = username
-    _save(data)
-
-def get_signup_bonus() -> int:
-    try:
-        return int(_load().get("signup_bonus", DEFAULT_SETTINGS["signup_bonus"]))
-    except (TypeError, ValueError):
-        return DEFAULT_SETTINGS["signup_bonus"]
-
-def set_signup_bonus(amount: int):
-    data = _load()
-    data["signup_bonus"] = int(amount)
-    _save(data)
-
-def get_referral_bonus_inviter() -> int:
-    try:
-        return int(_load().get("referral_bonus_inviter", DEFAULT_SETTINGS["referral_bonus_inviter"]))
-    except (TypeError, ValueError):
-        return DEFAULT_SETTINGS["referral_bonus_inviter"]
-
-def set_referral_bonus_inviter(amount: int):
-    data = _load()
-    data["referral_bonus_inviter"] = int(amount)
-    _save(data)
-
-def get_referral_bonus_invitee() -> int:
-    try:
-        return int(_load().get("referral_bonus_invitee", DEFAULT_SETTINGS["referral_bonus_invitee"]))
-    except (TypeError, ValueError):
-        return DEFAULT_SETTINGS["referral_bonus_invitee"]
-
-def set_referral_bonus_invitee(amount: int):
-    data = _load()
-    data["referral_bonus_invitee"] = int(amount)
-    _save(data)
-
-def get_special_panel_id():
-    return _load().get("special_panel_id", DEFAULT_SETTINGS["special_panel_id"])
-
-def set_special_panel_id(panel_id):
-    data = _load()
-    data["special_panel_id"] = panel_id
-    _save(data)
-
-def get_special_panel_commission_percent() -> int:
-    try:
-        return int(_load().get("special_panel_commission_percent", DEFAULT_SETTINGS["special_panel_commission_percent"]))
-    except (TypeError, ValueError):
-        return DEFAULT_SETTINGS["special_panel_commission_percent"]
-
-def set_special_panel_commission_percent(percent: int):
-    data = _load()
-    data["special_panel_commission_percent"] = int(percent)
-    _save(data)
-
-def is_hybrid_payment_enabled() -> bool:
-    return bool(_load().get("hybrid_payment_enabled", False))
-
-def set_hybrid_payment_enabled(value: bool):
-    data = _load()
-    data["hybrid_payment_enabled"] = bool(value)
-    _save(data)
-
-def get_card_number() -> str:
-    return str(_load().get("card_number", DEFAULT_SETTINGS["card_number"])).strip()
-
-def set_card_number(value: str):
-    data = _load()
-    data["card_number"] = value.strip()
-    _save(data)
-
-def get_card_holder() -> str:
-    return str(_load().get("card_holder", DEFAULT_SETTINGS["card_holder"])).strip()
-
-def set_card_holder(value: str):
-    data = _load()
-    data["card_holder"] = value.strip()
-    _save(data)
-
-def get_card_bank() -> str:
-    return str(_load().get("card_bank", DEFAULT_SETTINGS["card_bank"])).strip()
-
-def set_card_bank(value: str):
-    data = _load()
-    data["card_bank"] = value.strip()
-    _save(data)
-
-_COMBINED_SUB_BASE_URL = None
-
-def set_combined_sub_base_url(url: str):
-    global _COMBINED_SUB_BASE_URL
-    _COMBINED_SUB_BASE_URL = url.rstrip('/')
-    data = _load()
-    data["combined_sub_base_url"] = _COMBINED_SUB_BASE_URL
-    _save(data)
-
-def get_combined_sub_base_url() -> str:
-    global _COMBINED_SUB_BASE_URL
-    if _COMBINED_SUB_BASE_URL:
-        return _COMBINED_SUB_BASE_URL
-    data = _load()
-    url = data.get("combined_sub_base_url")
-    if url:
-        _COMBINED_SUB_BASE_URL = url.rstrip('/')
-        return _COMBINED_SUB_BASE_URL
-    default_url = "https://heysolo.ir"
-    _COMBINED_SUB_BASE_URL = default_url
-    return default_url
-
-def get_emergency_proxy_links() -> list:
-    if not _os.path.exists(_EMERGENCY_PROXY_FILE):
-        return []
-    try:
-        with open(_EMERGENCY_PROXY_FILE, "r", encoding="utf-8") as f:
-            return _json.load(f)
-    except Exception:
-        return []
-
-def set_emergency_proxy_links(links: list):
-    try:
-        with open(_EMERGENCY_PROXY_FILE, "w", encoding="utf-8") as f:
-            _json.dump(links, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        logging.getLogger(__name__).error(f"Error saving emergency proxies: {e}")
-EOF
-
-  # Update the combined_sub_base_url in the settings file
-  cat > "${target}/bot_settings.json" <<EOF
-{
-    "combined_sub_base_url": "${IRAN_HOST_URL}"
-}
-EOF
+  # جایگذاری API_BASE در فایل موجود
+  sed -i "s|const API_BASE = '';|const API_BASE = '${api_base}';|g" "$index_file"
   
-  ok "bot_settings.py and bot_settings.json configured with Iran host URL."
+  # API_KEY را خالی نگه می‌داریم (در صورت نیاز کاربر خودش تنظیم کند)
+  # sed -i "s|const API_KEY  = '';|const API_KEY  = '${API_KEY}';|g" "$index_file"
+
+  ok "index.php configured with API_BASE = ${api_base}"
 }
 
 clone_or_update_repo(){
@@ -456,9 +262,12 @@ setup_venv(){
   info "Creating Python virtual environment and installing packages..."
   cd "${INSTALL_DIR}"
   ${PY_BIN} -m venv venv
-  # shellcheck disable=SC1091
   source venv/bin/activate
   pip install --upgrade pip -q
+  # اطمینان از نصب aiohttp
+  if ! grep -q aiohttp requirements.txt 2>/dev/null; then
+    echo "aiohttp" >> requirements.txt
+  fi
   pip install -r requirements.txt -q
   deactivate
   ok "Python packages installed."
@@ -468,7 +277,6 @@ run_db_setup_script(){
   if [[ -f "${INSTALL_DIR}/setup_db.py" ]]; then
     info "Creating database tables..."
     cd "${INSTALL_DIR}"
-    # shellcheck disable=SC1091
     source venv/bin/activate
     python3 setup_db.py --auto || warn "Automatic table creation failed; you can run it manually later"
     deactivate
@@ -479,7 +287,7 @@ run_db_setup_script(){
 
 create_systemd_services(){
   info "Creating systemd services..."
-  
+
   # Main bot service
   cat > "${SERVICE_FILE}" <<EOF
 [Unit]
@@ -513,6 +321,16 @@ WorkingDirectory=${INSTALL_DIR}
 Environment="SUB_HOST=0.0.0.0"
 Environment="SUB_PORT=2053"
 Environment="ENV_FILE=${INSTALL_DIR}/.env"
+EOF
+
+  if [[ -n "${SSL_CERT_PATH:-}" && -n "${SSL_KEY_PATH:-}" ]]; then
+    cat >> "${SUB_SERVICE_FILE}" <<EOF
+Environment="SSL_CERT_FILE=${SSL_CERT_PATH}"
+Environment="SSL_KEY_FILE=${SSL_KEY_PATH}"
+EOF
+  fi
+
+  cat >> "${SUB_SERVICE_FILE}" <<EOF
 ExecStart=${INSTALL_DIR}/venv/bin/python3 ${INSTALL_DIR}/sub_api.py
 Restart=always
 RestartSec=3
@@ -528,147 +346,58 @@ EOF
   systemctl enable "${SUB_SERVICE_NAME}" >/dev/null
   systemctl restart "${SERVICE_NAME}"
   systemctl restart "${SUB_SERVICE_NAME}"
-  
+
   ok "Services created and started."
 }
 
-generate_index_php(){
-  cat > "${INSTALL_DIR}/index.php" <<EOF
-<?php
-// ==================================================
-// Subscription Proxy - Iran Host
-// Place this file on your Iran host at /sub/index.php
-// ==================================================
+# ============================================================
+# ========== Post-Installation Test Guide ==========
+# ============================================================
+show_test_guide(){
+  local protocol="http"
+  local domain="${SSL_DOMAIN:-localhost}"
+  local port="2053"
 
-// ---- Settings ----
-const API_BASE = 'http://${SERVER_IP}:2053';
-const API_KEY  = '';
-const SPONSOR_HTML = '
-<div style="text-align: center; margin-top: 30px; padding-top: 20px; border-top: 1px solid #ddd; font-size: 0.9rem;">
-    🌟 Sponsored by <a href="https://t.me/HeySoloATM" target="_blank" style="color:#1a73e8; text-decoration:none; font-weight:bold;">@HeySoloATM</a> – Subscription link costs covered.
-</div>';
+  if [[ -n "${SSL_CERT_PATH:-}" && -n "${SSL_KEY_PATH:-}" ]]; then
+    protocol="https"
+  fi
 
-function fetch_api(string $path) {
-    \$url = API_BASE . \$path;
-    \$ch = curl_init();
-    \$headers = ['Accept: application/json'];
-    if (API_KEY !== '') {
-        \$headers[] = 'X-API-Key: ' . API_KEY;
-    }
-    curl_setopt(\$ch, CURLOPT_URL, \$url);
-    curl_setopt(\$ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt(\$ch, CURLOPT_HTTPHEADER, \$headers);
-    curl_setopt(\$ch, CURLOPT_TIMEOUT, 20);
-    curl_setopt(\$ch, CURLOPT_SSL_VERIFYPEER, false);
-    curl_setopt(\$ch, CURLOPT_SSL_VERIFYHOST, false);
-    \$response = curl_exec(\$ch);
-    \$httpCode = curl_getinfo(\$ch, CURLINFO_HTTP_CODE);
-    \$err = curl_error(\$ch);
-    curl_close(\$ch);
-    return [\$httpCode, \$response, \$err];
+  echo ""
+  echo "============================================================"
+  echo "                   🔍 Service Test Guide"
+  echo "============================================================"
+  echo ""
+  echo "  📌 Services:"
+  echo "     🔹 Telegram Bot   : systemctl status ${SERVICE_NAME}"
+  echo "     🔹 Subscription API: systemctl status ${SUB_SERVICE_NAME}"
+  echo ""
+  echo "  📌 Test from inside the server:"
+  echo "     curl ${protocol}://127.0.0.1:${port}/health"
+  echo ""
+  echo "  📌 Test from outside (with domain):"
+  echo "     curl ${protocol}://${domain}:${port}/health"
+  echo ""
+  echo "  📌 If you receive 'ok', the service is working correctly."
+  echo ""
+  echo "  📌 Sample subscription link for users:"
+  echo "     ${IRAN_HOST_URL}/sub/USER_TOKEN"
+  echo ""
+  echo "  📌 View logs:"
+  echo "     journalctl -u ${SERVICE_NAME} -f"
+  echo "     journalctl -u ${SUB_SERVICE_NAME} -f"
+  echo ""
+  echo "  📌 index.php file for Iran host:"
+  echo "     📂 File location on this server: ${INSTALL_DIR}/index.php"
+  echo "     📤 Upload this file to your Iran host at /sub/index.php (root of the site)."
+  echo "     ✏️  The file has been pre-configured with API_BASE = ${protocol}://${domain}:${port}"
+  echo "     🔑 If you use API_KEY, set it in the file before uploading."
+  echo ""
+  echo "============================================================"
 }
 
-\$requestUri = \$_SERVER['REQUEST_URI'];
-\$userAgent  = \$_SERVER['HTTP_USER_AGENT'] ?? '';
-
-if (preg_match('#^/sub/([A-Za-z0-9]+)#', \$requestUri, \$matches)) {
-    \$token = \$matches[1];
-    \$isBrowser = (bool) preg_match('/(Chrome|Firefox|Safari|Opera|Edge|MSIE|Trident)/i', \$userAgent);
-
-    if (\$isBrowser) {
-        [\$httpCode, \$body, \$err] = fetch_api('/api/sub/' . urlencode(\$token) . '?details=1');
-        if (\$err || \$httpCode !== 200) {
-            http_response_code(\$httpCode ?: 502);
-            echo "❌ خطا در دریافت اطلاعات اشتراک" . (\$err ? ": \$err" : " (HTTP \$httpCode)");
-            exit;
-        }
-        \$data = json_decode(\$body, true);
-        if (!\$data) {
-            http_response_code(502);
-            echo "❌ پاسخ نامعتبر از سرویس اشتراک";
-            exit;
-        }
-        header('Content-Type: text/html; charset=utf-8');
-        \$subs = \$data['subscriptions'] ?? [];
-        \$count = \$data['count'] ?? 0;
-        
-        echo '<!DOCTYPE html><html lang="fa" dir="rtl"><head><meta charset="utf-8">';
-        echo '<meta name="viewport" content="width=device-width, initial-scale=1">';
-        echo '<title>اشتراک شما | جاده تونل</title>';
-        echo '<style>
-            body{font-family:Tahoma,Arial,sans-serif;background:#f5f6fa;margin:0;padding:20px;direction:rtl;}
-            .card{background:#fff;border-radius:12px;padding:16px 20px;margin-bottom:16px;box-shadow:0 1px 4px rgba(0,0,0,.08);}
-            .card h3{margin:0 0 8px;font-size:16px;color:#222;}
-            .meta{font-size:13px;color:#666;margin-bottom:10px;}
-            .config{background:#f0f2f5;border-radius:8px;padding:10px;font-size:12px;word-break:break-all;margin-bottom:8px;position:relative;}
-            .copy-btn{display:inline-block;margin-top:6px;padding:4px 10px;font-size:12px;border-radius:6px;background:#1a73e8;color:#fff;text-decoration:none;cursor:pointer;border:none;}
-            h2{text-align:center;color:#222;}
-            .empty{text-align:center;color:#888;margin-top:40px;}
-        </style></head><body>';
-        echo '<h2>🔑 اشتراک‌های فعال شما (' . (int)\$count . ' اشتراک)</h2>';
-        if (empty(\$subs)) {
-            echo '<div class="empty">هیچ اشتراک فعالی یافت نشد.</div>';
-        } else {
-            foreach (\$subs as \$sub) {
-                \$planName = htmlspecialchars(\$sub['plan_name'] ?? 'پلن', ENT_QUOTES, 'UTF-8');
-                \$endDate  = htmlspecialchars(\$sub['end_date'] ?? '-', ENT_QUOTES, 'UTF-8');
-                \$volume   = \$sub['remaining_volume'] ?? null;
-                echo '<div class="card">';
-                echo "<h3>📦 {\$planName}</h3>";
-                echo '<div class="meta">📅 انقضا: ' . \$endDate;
-                if (\$volume !== null) {
-                    echo ' | 📊 حجم باقیمانده: ' . (int)\$volume . ' گیگ';
-                }
-                echo '</div>';
-                \$links = \$sub['links'] ?? [];
-                foreach (\$links as \$i => \$link) {
-                    \$safeLink = htmlspecialchars(\$link, ENT_QUOTES, 'UTF-8');
-                    \$idAttr = 'cfg_' . uniqid();
-                    echo "<div class=\"config\"><span id=\"{\$idAttr}\">{\$safeLink}</span><br>";
-                    echo "<button class=\"copy-btn\" onclick=\"copyText('{\$idAttr}', this)\">📋 کپی کانفیگ " . (\$i + 1) . '</button></div>';
-                }
-                echo '</div>';
-            }
-        }
-        echo '<script>
-        function copyText(id, btn){
-            var text = document.getElementById(id).innerText;
-            navigator.clipboard.writeText(text).then(function(){
-                var old = btn.innerText;
-                btn.innerText = "✅ کپی شد";
-                setTimeout(function(){ btn.innerText = old; }, 1500);
-            });
-        }
-        </script>';
-        echo SPONSOR_HTML;
-        echo '</body></html>';
-        exit;
-    }
-
-    // ---- VPN Client Mode ----
-    [\$httpCode, \$body, \$err] = fetch_api('/api/sub/' . urlencode(\$token));
-    if (\$err || \$httpCode !== 200) {
-        http_response_code(\$httpCode ?: 502);
-        echo "Subscription error" . (\$err ? ": \$err" : " (HTTP \$httpCode)");
-        exit;
-    }
-    header('Content-Type: text/plain; charset=utf-8');
-    header('Content-Disposition: inline; filename="subscribe.txt"');
-    echo \$body;
-    exit;
-}
-
-echo "✅ Subscription proxy is active. Use /sub/YOUR_TOKEN to get your subscription.";
-EOF
-
-  ok "index.php generated at ${INSTALL_DIR}/index.php"
-  echo ""
-  echo "📝 To complete the setup, upload index.php to your Iran host:"
-  echo "   scp ${INSTALL_DIR}/index.php root@YOUR_IRAN_HOST:${IRAN_HOST_PATH}/index.php"
-  echo ""
-  echo "   Or copy the content and save it as index.php on your Iran host."
-  echo ""
-}
+# ============================================================
+# ========== Main Functions ==========
+# ============================================================
 
 full_install(){
   require_root
@@ -678,31 +407,18 @@ full_install(){
   setup_database
   collect_bot_config
   collect_iran_host_config
+  collect_ssl_config
   clone_or_update_repo
   write_config_json "${INSTALL_DIR}"
-  write_bot_settings "${INSTALL_DIR}"
+  configure_index_php
   setup_venv
   run_db_setup_script
   create_systemd_services
-  generate_index_php
   save_install_dir
-  
-  echo
+
   ok "✅ Installation completed successfully! 🎉"
-  echo "  📂 Install path     : ${INSTALL_DIR}"
-  echo "  🔧 Bot service      : ${SERVICE_NAME}"
-  echo "  🔧 Sub API service  : ${SUB_SERVICE_NAME}"
-  echo "  🌐 Sub API URL      : http://${SERVER_IP}:2053"
-  echo "  📜 Live logs        : journalctl -u ${SERVICE_NAME} -f"
-  echo "  📜 Sub API logs     : journalctl -u ${SUB_SERVICE_NAME} -f"
-  echo ""
-  echo "  ⚠️  IMPORTANT:"
-  echo "  1. Upload index.php to your Iran host:"
-  echo "     ${INSTALL_DIR}/index.php → ${IRAN_HOST_PATH}/index.php"
-  echo "  2. Make sure the Iran host can access http://${SERVER_IP}:2053"
-  echo "  3. Your subscription links will be: ${IRAN_HOST_URL}/sub/USER_TOKEN"
-  echo "  4. Make sure the bot is an ADMIN in your sponsor channel"
-  echo "     (needed for the Lifeline 'چراغ جاده تونل' post to be created/updated)."
+  show_test_guide
+  press_enter
 }
 
 update_bot(){
@@ -713,6 +429,7 @@ update_bot(){
   fi
   detect_python
   clone_or_update_repo
+  configure_index_php
   setup_venv
   systemctl restart "${SERVICE_NAME}"
   systemctl restart "${SUB_SERVICE_NAME}"
@@ -739,6 +456,7 @@ show_status(){
   systemctl status "${SERVICE_NAME}" --no-pager || true
   echo ""
   systemctl status "${SUB_SERVICE_NAME}" --no-pager || true
+  press_enter
 }
 
 uninstall_bot(){
@@ -798,12 +516,12 @@ main_menu(){
     echo "======================================"
     read -rp "Enter option number: " CHOICE
     case "$CHOICE" in
-      1) full_install; press_enter ;;
+      1) full_install;;
       2) update_bot; press_enter ;;
       3) restart_service; press_enter ;;
       4) view_logs ;;
       5) view_sub_logs ;;
-      6) show_status; press_enter ;;
+      6) show_status ;;
       7) uninstall_bot; press_enter ;;
       0) exit 0 ;;
       *) warn "Invalid option." ;;
