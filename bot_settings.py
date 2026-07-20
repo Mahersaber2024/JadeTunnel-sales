@@ -28,6 +28,9 @@ DEFAULT_SETTINGS = {
     "card_holder": "وحید صابر",
     "card_bank": "سامان",
     "combined_sub_base_url": "https://heysolo.ir",
+    "lifeline_enabled": False,
+    "emergency_plan_volume_gb": 10,      # <-- جدید
+    "emergency_plan_duration_days": 10,
 }
 
 _settings_cache = None
@@ -100,7 +103,15 @@ def set_membership_required(value: bool):
     data = _load()
     data["membership_required"] = bool(value)
     _save(data)
+    
+def is_lifeline_enabled() -> bool:
+    return bool(_load().get("lifeline_enabled", False))
 
+
+def set_lifeline_enabled(value: bool):
+    data = _load()
+    data["lifeline_enabled"] = bool(value)
+    _save(data)
 
 def get_support_username() -> str:
     """همیشه با @ برمی‌گرداند"""
@@ -284,3 +295,30 @@ def set_emergency_proxy_links(links: list):
     except Exception as e:
         import logging
         logging.getLogger(__name__).error(f"Error saving emergency proxies: {e}")
+
+# ====================== Emergency Plan Defaults ======================
+
+def get_emergency_plan_volume_gb() -> int:
+    try:
+        return int(_load().get("emergency_plan_volume_gb", DEFAULT_SETTINGS["emergency_plan_volume_gb"]))
+    except (TypeError, ValueError):
+        return DEFAULT_SETTINGS["emergency_plan_volume_gb"]
+
+
+def set_emergency_plan_volume_gb(value: int):
+    data = _load()
+    data["emergency_plan_volume_gb"] = int(value)
+    _save(data)
+
+
+def get_emergency_plan_duration_days() -> int:
+    try:
+        return int(_load().get("emergency_plan_duration_days", DEFAULT_SETTINGS["emergency_plan_duration_days"]))
+    except (TypeError, ValueError):
+        return DEFAULT_SETTINGS["emergency_plan_duration_days"]
+
+
+def set_emergency_plan_duration_days(value: int):
+    data = _load()
+    data["emergency_plan_duration_days"] = int(value)
+    _save(data)
