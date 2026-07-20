@@ -11,6 +11,9 @@ from telegram import (
 )
 import html as html_lib
 from telegram.ext import ContextTypes, ConversationHandler
+from urllib.parse import urlparse, parse_qs
+import lifeline
+
 logger = logging.getLogger(__name__)
 from telegram import LinkPreviewOptions
 from bot_settings import (
@@ -51,6 +54,7 @@ from logger_bot import (
 # Constants
 AMOUNT_SELECTION, CONFIRM_CHARGE, PAYMENT_METHOD = range(3)
 VOLUME_SELECTION = 3
+PRIORITY_TYPE_ORDER = ['tcp', 'grpc']
 
 
 INBOUND_IDS = [82, 80, 81]
@@ -133,7 +137,6 @@ async def send_payment_approval_request(bot, request_type: str, request_id: str,
         )
     except Exception as e:
         logger.error(f"Error sending payment approval request: {e}")
-
 
 async def admin_approve_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -223,6 +226,9 @@ async def admin_approve_payment(update: Update, context: ContextTypes.DEFAULT_TY
                 last_name=request_data.get('last_name')
             )
 
+            # ============ افزایش عمر چراغ جاده تونل ============
+            await lifeline.add_day(bot)
+
             # ============ دریافت نام پنل ============
             panel_name = "پنل پیش‌فرض"
             panel_id = sub_data.get('panel_id')
@@ -233,30 +239,29 @@ async def admin_approve_payment(update: Update, context: ContextTypes.DEFAULT_TY
                 if panel_data:
                     panel_name = panel_data.get('name', panel_id)
 
-            links = sub_data.get('links', [])
-            if links:
-                lines = "\n\n".join(f"🔸 کانفیگ {i+1}:\n<code>{l}</code>" for i, l in enumerate(links))
-                config_text = f"🔗 لینک‌های اشتراک شما ({len(links)} عدد):\n\n{lines}"
-            else:
-                config_text = (
-                    f"⚠️ شناسه اشتراک: <code>{sub_data.get('email', '')}</code>\n\n"
-                    f"لطفاً با پشتیبانی تماس بگیرید."
-                )
-
+            subscription_id = sub_data.get('subscription_id')
             price_str = f"{selected_plan['price']:,}"
+
+            # ============ لینک این طرح خریداری‌شده ============
+            single_link = get_single_sub_link(subscription_id)
+            link_line = f"\nلینک اشتراک شما (سازگار با نت ملی)\n<code>{single_link}</code>\n" if single_link else ""
+
+            keyboard = []
+            if subscription_id:
+                keyboard.append([InlineKeyboardButton("🔧 دریافت کانفیگ", callback_data=f"get_config_{subscription_id}")])
+
             await bot.send_message(
                 chat_id=user_id,
                 text=(
                     f"✅ پرداخت شما تایید شد!\n\n"
                     f"🖥 پنل: {panel_name}\n"
                     f"📦 پلن: {selected_plan['name']}\n"
-                    f"💰 مبلغ: {price_str} تومان\n\n"
-                    f"🔑 اطلاعات اشتراک شما:\n{config_text}"
+                    f"💰 مبلغ: {price_str} تومان\n"
+                    f"{link_line}\n"
+                    f"دریافت کانفیگ همینجا؛ دکمه زیر را بزنید 👇"
                 ),
                 parse_mode='HTML',
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("📒 مشاهده اشتراک‌ها", callback_data="view_subscriptions")]
-                ])
+                reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None
             )
 
         elif req_type == 'volume':
@@ -698,7 +703,7 @@ async def protocol_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # نمایش گزینه‌های طرح فروش به صورت کنار هم + دکمه شارژ دلخواه
     keyboard = [
         [
-            InlineKeyboardButton("🆕 طرح جدید (پیشنهادی)", callback_data="plan_type_new"),
+            InlineKeyboardButton("🆕 طرح جدید", callback_data="plan_type_new"),
             InlineKeyboardButton("📦 طرح قدیمی", callback_data="plan_type_old")
         ],
         [InlineKeyboardButton("🔥 طرح شارژ دلخواه", callback_data="plan_type_custom")]
@@ -864,18 +869,10 @@ async def custom_charge_from_plan(update: Update, context: ContextTypes.DEFAULT_
         keyboard.insert(1, [InlineKeyboardButton("➕ افزایش حجم اضافی", callback_data="add_extra_volume_from_plan")])
     
     await query.edit_message_text(
-        f"🔥 جاده تونل | طرح «شارژ دلخواه» 🔥\n\n"
-        f"دیگه پول حجم‌هایی که مصرف نمی‌کنی رو نده! 😎\n\n"
-        f"خیلی‌ها مجبور میشن از اول پلن‌های ۳۰ یا ۵۰ گیگی بخرن...\n"
-        f"اما شاید نصفش هم استفاده نکنن!\n\n"
-        f"💡 با طرح جدید جاده تونل:\n"
-        f"فقط به اندازه مصرفت هزینه پرداخت میکنی 👌\n\n"
-        f"💎 اشتراک ماهانه\n"
-        f"فقط ۱۱۲,۰۰۰ تومان (همراه با ۵ گیگ)\n\n"
-        f"➕ هر وقت حجم کم آوردی، به راحتی حجم بیشتری اضافه کن!\n"
-        f"🔥 هر گیگ اضافی فقط ۱,۹۵۰ تومان\n\n"
-        f"✅ بدون محدودیت تعداد کاربر\n"
-        f"⚡️ سرعت بالا و اتصال پایدار\n\n"
+        f"طرح شارژ دلخواه\n\n"
+        f"اشتراک ماهانه\n"
+        f"قیمت: ۱۱۲,۰۰۰ تومان (همراه با ۵ گیگ)\n\n"
+        f"قیمت هر گیگ اضافی: ۱,۹۵۰ تومان\n\n"
         f'<a href="https://t.me/jadetunnell/25">جزئیات بیشتر</a>',
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='HTML',
@@ -1558,8 +1555,7 @@ async def pay_with_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # === موفقیت ===
     db.add_transaction(user_id, -price, "purchase", f"خرید {selected_plan.get('name', '')}")
 
-    links = sub_data.get('links', [])
-    
+    subscription_id = sub_data.get('subscription_id')
     new_balance = balance - price
     price_str = f"{price:,}"
     balance_str = f"{new_balance:,}"
@@ -1585,20 +1581,15 @@ async def pay_with_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
         last_name=query.from_user.last_name
     )
 
-    # نمایش لینک‌ها
-    if links and len(links) > 0:
-        lines = "\n\n".join(
-            f"🔸 کانفیگ {i+1}:\n<code>{l}</code>" for i, l in enumerate(links)
-        )
-        config_text = (
-            f"🔗 لینک‌های اشتراک شما ({len(links)} عدد):\n\n{lines}\n\n"
-            f"📌 هر کدام از این لینک‌ها را می‌توانید جداگانه در کلاینت V2Ray خود اضافه کنید."
-        )
-    else:
-        config_text = f"⚠️ شناسه اشتراک: <code>{sub_data.get('email', '')}</code>\n\nلطفاً با پشتیبانی تماس بگیرید."
+    # ============ افزایش عمر چراغ جاده تونل ============
+    await lifeline.add_day(bot)
+
+    # ============ لینک این طرح خریداری‌شده ============
+    single_link = get_single_sub_link(subscription_id)
+    link_line = f"\nلینک اشتراک شما (سازگار با نت ملی)\n<code>{single_link}</code>\n" if single_link else ""
 
     keyboard = [
-        [InlineKeyboardButton("📒 مشاهده اشتراک‌ها", callback_data="view_subscriptions")],
+        [InlineKeyboardButton("🔧 دریافت کانفیگ", callback_data=f"get_config_{subscription_id}")],
         [InlineKeyboardButton("🔙 بازگشت به منو", callback_data="back_to_main")]
     ]
 
@@ -1607,8 +1598,9 @@ async def pay_with_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🖥 پنل: {panel_name}\n"
         f"📦 پلن: {plan_display_name}\n"
         f"💰 مبلغ: {price_str} تومان\n"
-        f"💳 موجودی جدید: {balance_str} تومان\n\n"
-        f"🔑 اطلاعات اشتراک شما:\n{config_text}",
+        f"💳 موجودی جدید: {balance_str} تومان\n"
+        f"{link_line}\n"
+        f"دریافت کانفیگ همینجا؛ دکمه زیر را بزنید 👇",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='HTML'
     )
@@ -1755,12 +1747,11 @@ async def handle_card_digits(update: Update, context: ContextTypes.DEFAULT_TYPE)
 - بانک: {get_card_bank()}
 💰 مبلغ دقیق: <code>{card_amount_str}</code> تومان
 
-<blockquote>• حتماً از کارتی با ۴ رقم آخر {digits} استفاده کنید
+<blockquote> حتماً از کارتی با ۴ رقم آخر {digits} استفاده کنید
 - مبلغ را دقیقاً واریز کنید (رند نکنید)
-- فقط کارت به کارت کنید(پل یا شبا نکنید)</blockquote>
-
-<blockquote>• پس از واریز، پرداخت شما توسط ادمین بررسی می‌شود
-- کانفیگ پس از تایید ادمین ارسال می‌شود</blockquote>"""
+- فقط کارت به کارت کنید(پل یا شبا نکنید)
+- کانفیگ پس از تایید ادمین ارسال می‌شود </blockquote>"""
+    
     await update.message.reply_text(invoice_text, parse_mode='HTML')
 
     await update.message.reply_text(
@@ -1781,12 +1772,6 @@ async def back_to_custom_charge(update: Update, context: ContextTypes.DEFAULT_TY
     await custom_charge_from_plan(update, context)
     
 async def payment_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Payment done - user confirms they've paid (card-to-card flow).
-    توجه: در جریان جدید، تایید نهایی و ساخت کانفیگ توسط ادمین از طریق دکمه‌های
-    فاکتور در گروه لاگ انجام می‌شود (به admin_approve_payment مراجعه کنید).
-    این تابع فقط برای سازگاری با جریان‌های قدیمی نگه داشته شده است.
-    """
     bot = context.bot
     query = update.callback_query
     await query.answer()
@@ -1838,6 +1823,9 @@ async def payment_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
         first_name=query.from_user.first_name,
         last_name=query.from_user.last_name
     )
+
+    # ============ افزایش عمر چراغ جاده تونل ============
+    await lifeline.add_day(bot)
     
     # اگر افزایش حجم اضافی از طریق کارت به کارت است
     extra_volume = context.user_data.get('extra_volume')
@@ -1861,16 +1849,12 @@ async def payment_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
    
     price_str = f"{selected_plan['price']:,}".replace(",", ".")
 
-    if links and len(links) > 0:
-        lines = "\n\n".join(
-            f"🔸 کانفیگ {i+1}:\n<code>{l}</code>" for i, l in enumerate(links)
-        )
-        config_text = f"🔗 لینک‌های اشتراک شما ({len(links)} عدد):\n\n{lines}"
-    else:
-        config_text = f"⚠️ شناسه اشتراک: <code>{sub_data.get('email', '')}</code>\n\nلطفاً با پشتیبانی تماس بگیرید."
-   
+    # ============ لینک این طرح خریداری‌شده ============
+    single_link = get_single_sub_link(subscription_id)
+    link_line = f"\nلینک اشتراک شما (سازگار با نت ملی)\n<code>{single_link}</code>\n" if single_link else ""
+
     keyboard = [
-        [InlineKeyboardButton("📒 مشاهده اشتراک‌ها", callback_data="view_subscriptions")],
+        [InlineKeyboardButton("🔧 دریافت کانفیگ", callback_data=f"get_config_{subscription_id}")],
         [InlineKeyboardButton("🔙 بازگشت به منو", callback_data="back_to_main")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1879,8 +1863,9 @@ async def payment_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"✅ پرداخت شما ثبت شد!\n\n"
         f"🏦 شماره کارت: ****{card_digits}\n"
         f"📦 پلن: {selected_plan['name']}\n"
-        f"💰 مبلغ: {price_str} تومان\n\n"
-        f"🔑 اطلاعات اشتراک شما:\n{config_text}\n\n"
+        f"💰 مبلغ: {price_str} تومان\n"
+        f"{link_line}\n"
+        f"دریافت کانفیگ همینجا؛ دکمه زیر را بزنید 👇\n\n"
         f"📌 در صورت مشکل با پشتیبانی تماس بگیرید.",
         reply_markup=reply_markup,
         parse_mode='HTML'
@@ -1909,43 +1894,41 @@ async def cancel_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return ConversationHandler.END
 
-def get_combined_sub_link(user_id: int):
-    """لینک اشتراک یکپارچه (همه پنل‌ها با هم) برای این کاربر"""
-    token = db.get_or_create_sub_token(user_id)
+def get_single_sub_link(subscription_id: int):
+    """لینک اشتراک اختصاصی (فقط همین یک طرح) برای این subscription"""
+    if not subscription_id:
+        return None
+    token = db.get_or_create_subscription_link_token(subscription_id)
     if not token:
         return None
     base = get_combined_sub_base_url().rstrip('/')
-    return f"{base}/sub/{token}"
+    return f"{base}/sub/single/{token}"
         
 # ============ View Subscriptions ============
 @require_membership
 async def view_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """View subscriptions handler - لینک همیشه لحظه‌ای از API پنل با email گرفته می‌شود"""
     user_id = update.effective_user.id
     subscriptions = db.get_active_subscriptions(user_id)
-   
+
     if not subscriptions:
         keyboard = [[InlineKeyboardButton("🛒 خرید VPN", callback_data="buy_vpn")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text(
             "📒 لیست اشتراک‌های شما:\n\n"
             "🔻 هنوز هیچ اشتراک فعالی ندارید.\n"
             "🔻 برای خرید از دکمه زیر استفاده کنید.",
-            reply_markup=reply_markup
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
         return
-   
+
+    combined_link = get_combined_sub_link(user_id)
+
     for idx, sub in enumerate(subscriptions, 1):
         protocol_names = {
             "wireguard": "WireGuard 🌐",
             "openvpn": "OpenVPN",
             "v2ray": "V2Ray | ویتوری"
         }
-        
-        # تعیین نام نمایشی طرح
-        plan_type_display = ""
-        volume_line = ""
-        
+
         if sub.get('plan_name'):
             plan_type_display = sub.get('plan_name')
         elif sub.get('plan_type') == 'custom_charge':
@@ -1954,18 +1937,20 @@ async def view_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE)
             plan_type_display = "🆕 طرح جدید (نامحدود)"
         elif sub.get('plan_type') == 'old':
             plan_type_display = "نامحدود تک کاربر"
+        elif sub.get('plan_type') == 'manual':
+            plan_type_display = "📦 اشتراک دستی"
         else:
             plan_type_display = "📦 طرح معمولی"
-        
-        if sub.get('plan_type') == 'custom_charge':
+
+        # ============ نمایش حجم — جدا از تشخیص نام طرح ============
+        # برای شارژ دلخواه و اشتراک‌های دستی که مقدار حجم دارند نشان بده
+        volume_line = ""
+        if sub.get('plan_type') in ('custom_charge', 'manual') and sub.get('remaining_volume', 0):
             volume_line = f"📊 حجم اشتراک: {sub.get('remaining_volume', 0)} گیگ\n"
-        
-        # دریافت لینک‌ها با استفاده از panel_id ذخیره شده
+
         email = sub.get('email', f"{user_id}_{idx}")
         panel_id = sub.get('panel_id')
-        config_text = ""
 
-        # ============ دریافت نام پنل ============
         panel_name = "پنل پیش‌فرض"
         if panel_id:
             panel_manager = get_panel_manager()
@@ -1973,42 +1958,15 @@ async def view_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE)
             if panel_data:
                 panel_name = panel_data.get('name', panel_id)
 
-        if email:
-            try:
-                from client_manager import get_panel_client
-                
-                # استفاده از panel_id ذخیره شده
-                if panel_id:
-                    client = get_panel_client(panel_id)
-                else:
-                    client = get_panel_client()
-                
-                links = client.get_client_links(email)
-
-                if links and len(links) > 0:
-                    config_lines = []
-                    for link in links:
-                        config_lines.append(f"<code>{link}</code>")
-                    config_text = "\n\n".join(config_lines)
-                else:
-                    client_info = client.get_client_info(email)
-                    if client_info and client_info.get('subId'):
-                        panel_base = client.panel_base
-                        sub_link = f"{panel_base}/sub/{client_info.get('subId')}"
-                        config_text = f"<code>{sub_link}</code>"
-                    else:
-                        config_text = "⚠️ لینک اشتراک در پنل یافت نشد"
-            except Exception as e:
-                logger.error(f"Error fetching links for {email} (panel: {panel_id}): {e}")
-                config_text = f"⚠️ خطا در دریافت لینک اشتراک (پنل: {panel_id or 'default'})"
-        else:
-            config_text = "⚠️ شناسه اشتراک (email) برای این اشتراک ثبت نشده است. با پشتیبانی تماس بگیرید."
-       
-        # فرمت تاریخ بدون ساعت
         start_date = str(sub.get('start_date', ''))[:10]
         end_date = str(sub.get('end_date', ''))[:10]
 
-        # ============ متن نهایی با نام پنل ============
+        link_line = f"\nلینک همه طرح‌ها (سازگار با نت ملی)\n<code>{combined_link}</code>\n" if combined_link else ""
+
+        # ============ لینک اختصاصی همین طرح ============
+        single_link = get_single_sub_link(sub['id'])
+        single_link_line = f"\nلینک این طرح\n<code>{single_link}</code>\n" if single_link else ""
+
         sub_text = f"""
 🔖 اشتراک: {email}
 
@@ -2021,25 +1979,120 @@ async def view_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE)
 📅 شروع: {start_date}
 📅 انقضا: {end_date}
 ✅ وضعیت: فعال
-
-🔑 کانفیگ:
-{config_text}
+{link_line}{single_link_line}
+دریافت کانفیگ همینجا؛ دکمه زیر را بزنید 👇
         """.strip()
-        
-        await update.message.reply_text(sub_text, parse_mode='HTML')
 
-    # ==================== لینک اشتراک یکپارچه ====================
-    combined_link = get_combined_sub_link(user_id)
-    if combined_link:
+        keyboard = [[InlineKeyboardButton("🔧 دریافت کانفیگ", callback_data=f"get_config_{sub['id']}")]]
+
         await update.message.reply_text(
-            "🔗 <b>لینک اشتراک یکپارچه (همه پلن‌ها با هم)</b>\n\n"
-            f"<code>{combined_link}</code>\n\n"
-            "📌 این لینک را در کلاینت خود Import کنید تا همه کانفیگ‌های فعال شما "
-            "(از هر پنلی که باشند) یکجا اضافه شود.\n"
-            "📌 در مرورگر باز کنید تا لیست تک‌تک کانفیگ‌ها را هم ببینید.",
-            parse_mode='HTML'
+            sub_text,
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            disable_web_page_preview=True
         )
-    
+        
+async def send_config_by_priority(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """با زدن دکمه «دریافت کانفیگ»، کانفیگ‌های پنل و کانفیگ‌های دستی ادمین را بر اساس اولویت می‌فرستد"""
+    query = update.callback_query
+    await query.answer("⏳ در حال دریافت کانفیگ...")
+
+    try:
+        subscription_id = int(query.data.replace("get_config_", ""))
+    except ValueError:
+        await query.message.reply_text("❌ خطا در شناسه اشتراک.")
+        return
+
+    subscription = db.get_subscription(subscription_id)
+    if not subscription:
+        await query.message.reply_text("⚠️ اطلاعات این اشتراک یافت نشد. با پشتیبانی تماس بگیرید.")
+        return
+
+    panel_id = subscription.get('panel_id')
+    email = subscription.get('email')
+
+    panel_links = []
+    if panel_id and email:
+        try:
+            client = get_panel_client(panel_id)
+            panel_links = client.get_client_links(email) or []
+        except Exception as e:
+            logger.error(f"Error fetching links for {email} (panel {panel_id}): {e}")
+            panel_links = []
+
+    manual_configs = db.get_manual_configs(subscription_id) or []
+
+    if not panel_links and not manual_configs:
+        await query.message.reply_text("⚠️ کانفیگی برای این اشتراک یافت نشد. با پشتیبانی تماس بگیرید.")
+        return
+
+    ordered_groups = group_combined_links(panel_links, manual_configs)
+
+    priority_labels = [
+        "الویت اول 👇🏻",
+        "الویت دوم(برای زمانی که اختلال نت زیاده) 👇🏻",
+    ]
+
+    for i, (_, links_list) in enumerate(ordered_groups):
+        label = priority_labels[i] if i < len(priority_labels) else f"الویت {i+1} 👇🏻"
+        config_lines = "\n".join(f"<code>{l}</code>" for l in links_list)
+        await query.message.reply_text(
+            f"{label}\n\n{config_lines}",
+            parse_mode='HTML',
+            disable_web_page_preview=True
+        )
+
+
+def group_combined_links(panel_links: list, manual_configs: list) -> list:
+    """
+    لینک‌های گرفته‌شده از پنل (بر اساس type در query string) و کانفیگ‌های دستی
+    (بر اساس priority ذخیره‌شده در دیتابیس) را با هم در یک ترتیب اولویت ترکیب می‌کند.
+    خروجی: لیستی از (priority_num, [links]) به ترتیب صعودی اولویت
+    """
+    groups = {}
+
+    for link in panel_links:
+        t = get_link_type(link) or 'other'
+        if t in PRIORITY_TYPE_ORDER:
+            priority_num = PRIORITY_TYPE_ORDER.index(t) + 1
+        else:
+            priority_num = 99
+        groups.setdefault(priority_num, []).append(link)
+
+    for mc in manual_configs:
+        priority_num = mc.get('priority', 1)
+        groups.setdefault(priority_num, []).append(mc['link'])
+
+    return [(k, groups[k]) for k in sorted(groups.keys())]
+        
+def get_link_type(link: str) -> str:
+    """نوع کانفیگ (tcp, grpc, ws, ...) را از روی query string لینک استخراج می‌کند"""
+    try:
+        parsed = urlparse(link)
+        qs = parse_qs(parsed.query)
+        return (qs.get('type', [''])[0] or '').strip().lower()
+    except Exception:
+        return ''
+
+def group_links_by_priority(links: list) -> list:
+    """
+    لینک‌ها را بر اساس type گروه‌بندی و بر اساس اولویت (tcp, grpc, سایر) مرتب می‌کند.
+    خروجی: لیستی از (type_name, [links]) به ترتیب اولویت
+    """
+    groups = {}
+    for link in links:
+        t = get_link_type(link) or 'other'
+        groups.setdefault(t, []).append(link)
+
+    ordered = []
+    for t in PRIORITY_TYPE_ORDER:
+        if t in groups:
+            ordered.append((t, groups.pop(t)))
+    # بقیه‌ی تایپ‌هایی که در لیست اولویت نبودند، در آخر
+    for t, l in groups.items():
+        ordered.append((t, l))
+    return ordered
+
 # ============ Account Info ============
 @require_membership
 async def account_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2566,42 +2619,51 @@ async def emergency_build_config(update: Update, context: ContextTypes.DEFAULT_T
     user_id = query.from_user.id
     access = db.get_emergency_access(user_id)
     if not access or access.get('status') != 'approved' or access.get('access_type') not in ('config', 'both'):
-        await query.edit_message_text("⛔️ شما به بخش «ساخت کانفیگ» طرح اضطراری دسترسی ندارید.")
+        await query.edit_message_text("شما به بخش ساخت کانفیگ طرح اضطراری دسترسی ندارید.")
         return
     
     panel_manager = get_panel_manager()
     all_panels = panel_manager.get_all_panels()
 
     if not all_panels:
-        await query.edit_message_text("❌ در حال حاضر هیچ پنلی فعال نیست.")
+        await query.edit_message_text("در حال حاضر هیچ پنلی فعال نیست.")
         return
 
     existing_panel_ids = db.get_emergency_panel_ids(user_id)
 
+    # لیست پنل‌های قابل انتخاب
     keyboard = []
     for panel_id, panel_data in all_panels.items():
         if not panel_data.get('enabled', True):
             continue
-        if 'emergency' not in panel_data.get('plan_types', []):  # <-- فیلتر جدید
+        if 'emergency' not in panel_data.get('plan_types', []):
             continue
         if panel_id in existing_panel_ids:
             continue
         keyboard.append([InlineKeyboardButton(
-            f"🖥 {panel_data.get('name', panel_id)}",
+            f"{panel_data.get('name', panel_id)}",
             callback_data=f"emergency_panel_{panel_id}"
         )])
 
     if not keyboard:
-        await query.edit_message_text(
-            "😔 در حال حاضر پنلی برای دریافت کانفیگ اضطراری تنظیم نشده یا شما قبلاً از تمام پنل‌های موجود دریافت کرده‌اید.\n\n"
-            "لطفاً با پشتیبانی تماس بگیرید."
+        # بررسی اینکه آیا اصلاً پنل فعالی وجود دارد یا کاربر همه را ساخته
+        all_panels_exist = any(
+            panel_data.get('enabled', True) and 'emergency' in panel_data.get('plan_types', [])
+            for panel_data in all_panels.values()
         )
+        
+        if not all_panels_exist:
+            message = "در حال حاضر هیچ پنلی برای ساخت کانفیگ اضطراری تنظیم نشده است."
+        else:
+            message = "شما قبلاً از تمام پنل‌های موجود، کانفیگ اضطراری ساخته‌اید.\nهر کاربر فقط یک بار از هر پنل می‌تواند کانفیگ بسازد."
+        
+        await query.edit_message_text(message)
         return
 
     await query.edit_message_text(
-        "🔧 ساخت کانفیگ اضطراری\n\n"
-        "لطفاً پنل مورد نظر برای دریافت اشتراک اضطراری رایگان را انتخاب کنید:\n"
-        "⚠️ فقط یک اشتراک اضطراری از هر پنل مجاز است.",
+        "ساخت کانفیگ اضطراری\n\n"
+        "پنل مورد نظر خود را انتخاب کنید:\n"
+        "توجه: هر کاربر فقط یک بار از هر پنل می‌تواند کانفیگ بسازد.",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -2612,7 +2674,7 @@ async def emergency_get_proxy(update: Update, context: ContextTypes.DEFAULT_TYPE
     user_id = query.from_user.id
     access = db.get_emergency_access(user_id)
     if not access or access.get('status') != 'approved' or access.get('access_type') not in ('proxy', 'both'):
-        await query.edit_message_text("⛔️ شما به بخش «دریافت پروکسی» طرح اضطراری دسترسی ندارید.")
+        await query.edit_message_text("شما به بخش دریافت پروکسی طرح اضطراری دسترسی ندارید.")
         return
 
     from bot_settings import get_emergency_proxy_links
@@ -2620,8 +2682,8 @@ async def emergency_get_proxy(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if not proxies:
         await query.edit_message_text(
-            "😔 در حال حاضر پروکسی‌ای برای ارسال موجود نیست.\n"
-            "لطفاً بعداً دوباره امتحان کن یا با پشتیبانی در تماس باش."
+            "در حال حاضر پروکسی دردسترس نیست.\n"
+            "لطفاً بعداً مجدداً تلاش کنید."
         )
         return
 
@@ -2636,11 +2698,9 @@ async def emergency_get_proxy(update: Update, context: ContextTypes.DEFAULT_TYPE
         keyboard.append(row)
 
     message = (
-        "🎁 <b>پروکسی ویژه اشتراک شما آماده‌ست!</b>\n\n"
-        "می‌دونیم گاهی عجله داری و نمی‌تونی منتظر بمونی، برای همین این پروکسی‌ها رو "
-        "همین الان برات آماده کردیم تا بدون وقفه به راهت ادامه بدی 🌿\n\n"
-        "👇 کافیه روی هرکدوم بزنی تا مستقیم به کلاینتت اضافه بشه.\n\n"
-        "اگه سوالی داشتی، پشتیبانی همیشه کنارته 💬"
+        "<b>پروکسی‌های فعال</b>\n\n"
+        "جهت استفاده، روی هرکدام کلیک کنید تا به کلاینت شما اضافه شود.\n"
+        "در صورت بروز مشکل، از بخش پشتیبانی اقدام کنید."
     )
 
     await query.edit_message_text(
@@ -2661,15 +2721,15 @@ async def emergency_panel_selected(update: Update, context: ContextTypes.DEFAULT
     panel_data = panel_manager.get_panel(panel_id)
 
     if not panel_data or not panel_data.get('enabled', True):
-        await query.edit_message_text("❌ این پنل در دسترس نیست.")
+        await query.edit_message_text("این پنل در دسترس نیست.")
         return
 
     # جلوگیری از ساخت بیش از یک کلاینت اضطراری روی هر پنل
     if db.has_emergency_subscription(user_id, panel_id):
-        await query.edit_message_text("⚠️ شما قبلاً از این پنل اشتراک اضطراری دریافت کرده‌اید.")
+        await query.edit_message_text("شما قبلاً از این پنل کانفیگ اضطراری ساخته‌اید.\nهر کاربر فقط یک بار از هر پنل می‌تواند کانفیگ بسازد.")
         return
 
-    await query.edit_message_text("⏳ در حال ایجاد اشتراک اضطراری...")
+    await query.edit_message_text("در حال ساخت اشتراک اضطراری...")
 
     panel_client = PanelClient(panel_id)
     email = f"{user_id}_emg_{panel_id}"
@@ -2684,8 +2744,7 @@ async def emergency_panel_selected(update: Update, context: ContextTypes.DEFAULT
 
     if not success or not client_data:
         await query.edit_message_text(
-            f"❌ خطا در ایجاد اشتراک اضطراری در پنل: {msg}\n\n"
-            "لطفاً با پشتیبانی تماس بگیرید."
+            f"خطا در ساخت اشتراک اضطراری در پنل: {msg}"
         )
         return
 
@@ -2700,22 +2759,22 @@ async def emergency_panel_selected(update: Update, context: ContextTypes.DEFAULT
         duration_days=EMERGENCY_PLAN_DURATION_DAYS,
         plan_type='emergency',
         initial_volume=EMERGENCY_PLAN_VOLUME_GB,
-        plan_name="🆘 طرح اضطراری",
+        plan_name="طرح اضطراری",
         email=email,
         panel_id=panel_id
     )
 
     if links:
-        lines = "\n\n".join(f"🔸 کانفیگ {i+1}:\n<code>{l}</code>" for i, l in enumerate(links))
-        config_text = f"🔗 لینک‌های اشتراک شما ({len(links)} عدد):\n\n{lines}"
+        lines = "\n\n".join(f"کانفیگ {i+1}:\n<code>{l}</code>" for i, l in enumerate(links))
+        config_text = f"لینک‌های اشتراک شما ({len(links)} عدد):\n\n{lines}"
     else:
-        config_text = f"⚠️ شناسه اشتراک: <code>{email}</code>\n\nلطفاً با پشتیبانی تماس بگیرید."
+        config_text = f"شناسه اشتراک: <code>{email}</code>"
 
     await query.edit_message_text(
-        f"✅ اشتراک اضطراری شما با موفقیت ایجاد شد!\n\n"
-        f"🖥 پنل: {panel_data.get('name', panel_id)}\n"
-        f"📊 حجم: {EMERGENCY_PLAN_VOLUME_GB} گیگ\n"
-        f"⏰ مدت: {EMERGENCY_PLAN_DURATION_DAYS} روز\n\n"
+        f"اشتراک اضطراری شما با موفقیت ساخته شد!\n\n"
+        f"پنل: {panel_data.get('name', panel_id)}\n"
+        f"حجم: {EMERGENCY_PLAN_VOLUME_GB} گیگ\n"
+        f"مدت: {EMERGENCY_PLAN_DURATION_DAYS} روز\n\n"
         f"{config_text}",
         parse_mode='HTML'
     )
@@ -2845,21 +2904,23 @@ async def view_subscriptions_callback(update: Update, context: ContextTypes.DEFA
             "v2ray": "V2Ray | ویتوری"
         }
         
-        # تشخیص نوع طرح و نام نمایشی
-        plan_type_display = ""
-        volume_suffix = ""
-        
+        # تشخیص نام نمایشی طرح
         if sub.get('plan_name'):
             plan_type_display = sub.get('plan_name')
         elif sub.get('plan_type') == 'custom_charge':
             plan_type_display = "🔥 شارژ دلخواه"
-            volume_suffix = f" - حجم اشتراک: {sub.get('remaining_volume', 0)} گیگ"
         elif sub.get('plan_type') == 'new':
             plan_type_display = "🆕 جدید"
         elif sub.get('plan_type') == 'old':
             plan_type_display = "📦 قدیمی"
         else:
             plan_type_display = "📦 معمولی"
+
+        # ============ نمایش حجم — جدا از نام طرح ============
+        # برای شارژ دلخواه، دستی، و هر طرحی که remaining_volume دارد نشان بده
+        volume_suffix = ""
+        if sub.get('plan_type') in ('custom_charge', 'manual') and sub.get('remaining_volume', 0):
+            volume_suffix = f" - حجم اشتراک: {sub.get('remaining_volume', 0)} گیگ"
         
         text += f"{i}. {protocol_names.get(sub['protocol'], sub['protocol'])} - {plan_type_display} - {sub['duration_days']} روز - تا {sub['end_date']}{volume_suffix}\n"
    
@@ -2867,7 +2928,6 @@ async def view_subscriptions_callback(update: Update, context: ContextTypes.DEFA
         text,
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_main")]])
     )
-    
 # ============ Create VPN Client in 3xUI Panel with Subscription Link ============
 
 async def create_panel_client_and_get_link(email, total_gb, expiry_days, inbound_ids=None, plan_type='old'):
