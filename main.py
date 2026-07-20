@@ -11,15 +11,20 @@ from telegram.ext import (
     CallbackQueryHandler,
     MessageHandler,
     filters,
-    ConversationHandler
+    ConversationHandler,
+    ContextTypes,
+    ChatMemberHandler
 )
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from handlers import admin_approve_payment, admin_reject_payment
 
 import lifeline
-from telegram.ext import ChatMemberHandler
 from bot_settings import get_sponsor_channel
+
+from datetime import time as dt_time
+from zoneinfo import ZoneInfo
+import daily_reset
 
 from config import config
 from database import Database
@@ -47,6 +52,8 @@ from admin import (
     ADMIN_MANUAL_SUB_PLAN_NAME,
     ADMIN_MANUAL_SUB_EXPIRY,
     ADMIN_MANUAL_SUB_VOLUME,        # <-- جدید
+    ADMIN_EMERGENCY_VOLUME_INPUT,      # <-- جدید
+    ADMIN_EMERGENCY_DURATION_INPUT,    # <-- جدید
     ADMIN_MANUAL_SUB_PRIORITY,
     ADMIN_MANUAL_SUB_CONFIG,
     set_db as set_admin_db,
@@ -143,7 +150,13 @@ from admin import (
     admin_addconfig_select_sub,
     admin_addconfig_priority_selected,
     admin_addconfig_link_input,
-    
+    admin_lifeline_settings_menu,
+    admin_lifeline_toggle,
+    admin_emergency_plan_settings_menu,   # <-- جدید
+    admin_emergency_edit_volume_start,    # <-- جدید
+    admin_emergency_edit_volume_input,    # <-- جدید
+    admin_emergency_edit_duration_start,  # <-- جدید
+    admin_emergency_edit_duration_input,  # <-- جدید
     set_get_main_menu
 )
 
@@ -251,6 +264,7 @@ def main():
         db_config = config.get_db_config()
         db = Database(db_config)
         handlers.set_db(db)
+        daily_reset.set_db(db)
         set_admin_db(db)
         send_gift.set_db(db)
         lifeline.set_db(db)
@@ -630,7 +644,35 @@ def main():
         fallbacks=[CommandHandler("cancel", admin_cancel)]
     )
     application.add_handler(admin_addconfig_conv)
-    
+    application.add_handler(CallbackQueryHandler(admin_emergency_plan_settings_menu, pattern="^admin_emergency_plan_settings$"))
+
+    admin_emergency_volume_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_emergency_edit_volume_start, pattern="^admin_emergency_edit_volume$")],
+        states={
+            ADMIN_EMERGENCY_VOLUME_INPUT: [
+                CommandHandler("cancel", admin_cancel),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_emergency_edit_volume_input)
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", admin_cancel)]
+    )
+    application.add_handler(admin_emergency_volume_conv)
+
+    admin_emergency_duration_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_emergency_edit_duration_start, pattern="^admin_emergency_edit_duration$")],
+        states={
+            ADMIN_EMERGENCY_DURATION_INPUT: [
+                CommandHandler("cancel", admin_cancel),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_emergency_edit_duration_input)
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", admin_cancel)]
+    )
+    application.add_handler(admin_emergency_duration_conv)
+
+    application.add_handler(CallbackQueryHandler(admin_lifeline_settings_menu, pattern="^admin_lifeline_settings$"))
+    application.add_handler(CallbackQueryHandler(admin_lifeline_toggle, pattern="^admin_lifeline_toggle$"))
+
     application.add_handler(CallbackQueryHandler(handlers.send_config_by_priority, pattern="^get_config_"))
     application.add_handler(CallbackQueryHandler(admin_emergency_proxy_menu, pattern="^admin_emergency_proxy_settings$"))
     application.add_handler(CallbackQueryHandler(admin_emergency_proxy_delete, pattern="^admin_emergency_proxy_del_"))
@@ -726,12 +768,27 @@ def main():
         old_status = result.old_chat_member.status
         new_status = result.new_chat_member.status
         was_member = old_status in ("member", "administrator", "creator")
-        if was_member and new_status in ("left", "kicked"):
-            await lifeline.subtract_day(context.bot)
+        is_member_now = new_status in ("member", "administrator", "creator")
+
+        if not was_member and is_member_now:
+            await lifeline.add_day(context.bot)          # عضویت جدید = +۱ روز
+        elif was_member and not is_member_now:
+            await lifeline.subtract_day(context.bot)      # خروج = −۱ روز
 
     application.add_handler(ChatMemberHandler(handle_channel_member_update, ChatMemberHandler.CHAT_MEMBER))
 
     application.job_queue.run_repeating(lifeline.refresh_pulse, interval=1800, first=10)
+    application.job_queue.run_repeating(
+        daily_reset.run_emergency_plan_cleanup,
+        interval=1800,
+        first=30,
+        name="emergency_plan_cleanup"
+    )
+    application.job_queue.run_daily(
+        daily_reset.run_daily_traffic_reset,
+        time=dt_time(hour=0, minute=5, tzinfo=ZoneInfo("Asia/Tehran")),
+        name="daily_traffic_reset"
+    )
 
     async def admin_lifeline_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not is_admin(update.effective_user.id):
