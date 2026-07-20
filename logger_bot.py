@@ -727,3 +727,27 @@ async def log_gift_sent(bot, sender_id: int, recipient_id: int, amount: int, gif
     """.strip()
 
     await send_log_message(Topics.GIFT_SENT, message, bot=bot)
+
+async def log_emergency_config_result(bot, user_id: int, panel_id: str, panel_name: str, status: str,
+                                       detail: str = None,
+                                       username: str = None, first_name: str = None, last_name: str = None):
+    """Log emergency plan config creation result (success/failure)"""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    details = _resolve_user_details(user_id, username, first_name, last_name)
+    user_info = format_user_full(**details)
+
+    status_text = "✅ موفق" if status == 'success' else "❌ ناموفق"
+    detail_line = ""
+    if detail and status != 'success':
+        detail_line = f"\n❌ خطا:\n<code>{detail[:500]}</code>"
+
+    message = f"""
+🆘 **ساخت کانفیگ طرح اضطراری**
+🕐 زمان: {timestamp}
+{user_info}
+🖥 پنل: {panel_name} (`{panel_id}`)
+📊 **وضعیت:** {status_text}{detail_line}
+    """.strip()
+
+    await send_log_message(Topics.EMERGENCY_PLAN, message, parse_mode='HTML', bot=bot)
