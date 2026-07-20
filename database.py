@@ -211,6 +211,30 @@ class Database:
                 )
             """)
 
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS bot_lifeline (
+                    id INTEGER PRIMARY KEY DEFAULT 1,
+                    days_remaining INTEGER NOT NULL DEFAULT 30,
+                    max_days INTEGER NOT NULL DEFAULT 30,
+                    channel_id VARCHAR(100),
+                    message_id BIGINT,
+                    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    CHECK (id = 1)
+                )
+            """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS manual_configs (
+                    id SERIAL PRIMARY KEY,
+                    subscription_id INTEGER NOT NULL,
+                    link TEXT NOT NULL,
+                    priority INTEGER NOT NULL DEFAULT 1,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (subscription_id) REFERENCES subscriptions(id) ON DELETE CASCADE
+                )
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_manual_configs_sub_id ON manual_configs(subscription_id)")
+            
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_subscriptions_user_id ON subscriptions(user_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_subscriptions_status ON subscriptions(status)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_transactions_user_id ON transactions(user_id)")
@@ -600,11 +624,10 @@ class Database:
         return cursor.rowcount > 0
 
     def get_subscription(self, subscription_id):
-        """Get a specific subscription by ID"""
         cursor = self.conn.cursor()
         cursor.execute("""
             SELECT id, user_id, protocol, duration_days, email,
-               plan_type, remaining_volume, start_date, end_date
+               plan_type, remaining_volume, start_date, end_date, panel_id, plan_name
             FROM subscriptions 
             WHERE id = %s
         """, (subscription_id,))
@@ -619,7 +642,9 @@ class Database:
                 'plan_type': row[5],
                 'remaining_volume': row[6],
                 'start_date': row[7],
-                'end_date': row[8]
+                'end_date': row[8],
+                'panel_id': row[9],
+                'plan_name': row[10],
             }
         return None
 
@@ -676,7 +701,42 @@ class Database:
         finally:
             if cursor:
                 cursor.close()
-            
+    # ============ Manual Config Methods ============
+    def add_manual_config(self, subscription_id: int, link: str, priority: int = 1) -> bool:
+        cursor = None
+        try:
+            cursor = self.get_cursor()
+            cursor.execute(
+                "INSERT INTO manual_configs (subscription_id, link, priority) VALUES (%s, %s, %s)",
+                (subscription_id, link, priority)
+            )
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Error adding manual config: {e}")
+            if self.conn:
+                self.conn.rollback()
+            return False
+        finally:
+            if cursor:
+                cursor.close()
+
+    def get_manual_configs(self, subscription_id: int):
+        cursor = None
+        try:
+            cursor = self.get_cursor()
+            cursor.execute(
+                "SELECT id, link, priority FROM manual_configs WHERE subscription_id = %s ORDER BY priority ASC, id ASC",
+                (subscription_id,)
+            )
+            return cursor.fetchall()
+        except Exception as e:
+            logger.error(f"Error getting manual configs: {e}")
+            return []
+        finally:
+            if cursor:
+                cursor.close()
+
     # ============ Admin: Delete User / Reset Balance ============
     def delete_user(self, user_id: int) -> bool:
         """
@@ -888,3 +948,74 @@ class Database:
         finally:
             if cursor:
                 cursor.close()                
+
+    def get_lifeline(self):
+        cursor = None
+        try:
+            cursor = self.get_cursor()
+            cursor.execute("SELECT * FROM bot_lifeline WHERE id = 1")
+            row = cursor.fetchone()
+            if not row:
+                cursor.execute(
+                    "INSERT INTO bot_lifeline (id, days_remaining, max_days) VALUES (1, 30, 30) "
+                    "ON CONFLICT (id) DO NOTHING"
+                )
+                self.conn.commit()
+                cursor.execute("SELECT * FROM bot_lifeline WHERE id = 1")
+                row = cursor.fetchone()
+            return row
+        except Exception as e:
+            logger.error(f"Error getting lifeline: {e}")
+            return None
+        finally:
+            if cursor:
+                cursor.close()
+
+    def adjust_lifeline_days(self, delta: int, max_days: int = None):
+        cursor = None
+        try:
+            cursor = self.get_cursor()
+            self.get_lifeline()  # مطمئن شو رکورد وجود دارد
+            if max_days is not None:
+                cursor.execute(
+                    "UPDATE bot_lifeline SET days_remaining = GREATEST(0, LEAST(%s, days_remaining + %s)), "
+                    "last_updated = NOW() WHERE id = 1",
+                    (max_days, delta)
+                )
+            else:
+                cursor.execute(
+                    "UPDATE bot_lifeline SET days_remaining = GREATEST(0, days_remaining + %s), "
+                    "last_updated = NOW() WHERE id = 1",
+                    (delta,)
+                )
+            self.conn.commit()
+            cursor.execute("SELECT days_remaining FROM bot_lifeline WHERE id = 1")
+            row = cursor.fetchone()
+            return row['days_remaining'] if row else None
+        except Exception as e:
+            logger.error(f"Error adjusting lifeline days: {e}")
+            if self.conn:
+                self.conn.rollback()
+            return None
+        finally:
+            if cursor:
+                cursor.close()
+
+    def set_lifeline_message(self, channel_id: str, message_id: int):
+        cursor = None
+        try:
+            cursor = self.get_cursor()
+            cursor.execute(
+                "UPDATE bot_lifeline SET channel_id = %s, message_id = %s WHERE id = 1",
+                (channel_id, message_id)
+            )
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Error setting lifeline message: {e}")
+            if self.conn:
+                self.conn.rollback()
+            return False
+        finally:
+            if cursor:
+                cursor.close()
