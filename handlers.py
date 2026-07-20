@@ -29,7 +29,9 @@ from bot_settings import (
     is_hybrid_payment_enabled,
     get_card_number, 
     get_card_holder,
-    get_card_bank,   
+    get_card_bank,
+    get_emergency_plan_volume_gb,      # <-- جدید
+    get_emergency_plan_duration_days,
 )
 
 from panel_manager import get_panel_manager
@@ -48,7 +50,8 @@ from logger_bot import (
     log_balance_change,
     log_referral_bonus,
     log_volume_added,
-    log_system_error
+    log_system_error,
+    log_emergency_config_result
 )
 
 # Constants
@@ -58,9 +61,6 @@ PRIORITY_TYPE_ORDER = ['tcp', 'grpc']
 
 
 INBOUND_IDS = [82, 80, 81]
-# ============ تنظیمات طرح اضطراری ============
-EMERGENCY_PLAN_VOLUME_GB = 0
-EMERGENCY_PLAN_DURATION_DAYS = 30
 
 # Global database instance
 db = None
@@ -182,8 +182,10 @@ async def admin_approve_payment(update: Update, context: ContextTypes.DEFAULT_TY
                         user_id, wallet_used, "refund",
                         "بازگشت وجه کسر شده از کیف پول (خطا در ایجاد کلاینت)"
                     )
+
+                admin_detail = (sub_data or {}).get('admin_error', msg)
                 await log_panel_error(
-                    bot, user_id, "ایجاد کلاینت (تایید ادمین)", msg,
+                    bot, user_id, "Client creation (admin approval)", admin_detail,
                     plan_name=selected_plan.get('name'),
                     username=request_data.get('username'),
                     first_name=request_data.get('first_name'),
@@ -192,7 +194,7 @@ async def admin_approve_payment(update: Update, context: ContextTypes.DEFAULT_TY
                 try:
                     await bot.send_message(
                         chat_id=user_id,
-                        text="❌ متاسفانه در ایجاد اشتراک شما خطایی رخ داد. لطفاً با پشتیبانی تماس بگیرید."
+                        text=f"❌ {msg}"
                     )
                 except Exception as e:
                     logger.error(f"Error notifying user of creation failure: {e}")
@@ -226,8 +228,8 @@ async def admin_approve_payment(update: Update, context: ContextTypes.DEFAULT_TY
                 last_name=request_data.get('last_name')
             )
 
-            # ============ افزایش عمر چراغ جاده تونل ============
-            await lifeline.add_day(bot)
+            # ============ افزایش عمر چراغ جاده تونل (+۴ روز برای خرید) ============
+            await lifeline.add_day(bot, amount=4)
 
             # ============ دریافت نام پنل ============
             panel_name = "پنل پیش‌فرض"
@@ -244,7 +246,7 @@ async def admin_approve_payment(update: Update, context: ContextTypes.DEFAULT_TY
 
             # ============ لینک این طرح خریداری‌شده ============
             single_link = get_single_sub_link(subscription_id)
-            link_line = f"\nلینک اشتراک شما (سازگار با نت ملی)\n<code>{single_link}</code>\n" if single_link else ""
+            link_line = f"لینک اشتراک شما:\n<code>{single_link}</code>\n\n" if single_link else ""
 
             keyboard = []
             if subscription_id:
@@ -256,14 +258,14 @@ async def admin_approve_payment(update: Update, context: ContextTypes.DEFAULT_TY
                     f"✅ پرداخت شما تایید شد!\n\n"
                     f"🖥 پنل: {panel_name}\n"
                     f"📦 پلن: {selected_plan['name']}\n"
-                    f"💰 مبلغ: {price_str} تومان\n"
-                    f"{link_line}\n"
-                    f"دریافت کانفیگ همینجا؛ دکمه زیر را بزنید 👇"
+                    f"💰 مبلغ: {price_str} تومان\n\n"
+                    f"{link_line}"
+                    f"دریافت کانفیگ‌ها در تلگرام؛ دکمه زیر را بزنید 👇"
                 ),
                 parse_mode='HTML',
                 reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None
             )
-
+            
         elif req_type == 'volume':
             subscription_id = request_data['subscription_id']
             volume = request_data['volume']
@@ -280,6 +282,11 @@ async def admin_approve_payment(update: Update, context: ContextTypes.DEFAULT_TY
 
             # حجم کل جدید را از دیتابیس بخوان (نه از پنل)
             subscription = db.get_subscription(subscription_id)
+
+            # ============ پیش‌فرض موفق؛ اگر کلاینتی برای آپدیت نبود، پیام موفقیت درست است ============
+            panel_success = True
+            panel_msg = ""
+
             if subscription and subscription.get('email'):
                 from client_manager import get_panel_client
                 panel_client = get_panel_client()
@@ -288,6 +295,12 @@ async def admin_approve_payment(update: Update, context: ContextTypes.DEFAULT_TY
                 )
                 if not panel_success:
                     logger.error(f"Failed to update panel volume for {subscription['email']}: {panel_msg}")
+                    await log_panel_error(
+                        bot, user_id, "Panel volume update", panel_msg,
+                        username=request_data.get('username'),
+                        first_name=request_data.get('first_name'),
+                        last_name=request_data.get('last_name')
+                    )
 
             await log_volume_added(
                 bot, user_id, subscription_id, volume, price, 'کارت به کارت',
@@ -297,13 +310,25 @@ async def admin_approve_payment(update: Update, context: ContextTypes.DEFAULT_TY
             )
 
             remaining_volume = subscription.get('remaining_volume', 0) if subscription else 0
-            await bot.send_message(
-                chat_id=user_id,
-                text=(
-                    f"✅ پرداخت شما تایید شد و {volume} گیگ حجم اضافی به اشتراک شما اضافه شد!\n\n"
-                    f"📊 حجم اشتراک: {remaining_volume} گیگ"
+
+            # ============ پیام به کاربر بر اساس نتیجه‌ی واقعی آپدیت پنل ============
+            if panel_success:
+                await bot.send_message(
+                    chat_id=user_id,
+                    text=(
+                        f"✅ پرداخت شما تایید شد و {volume} گیگ حجم اضافی به اشتراک شما اضافه شد!\n\n"
+                        f"📊 حجم اشتراک: {remaining_volume} گیگ"
+                    )
                 )
-            )
+            else:
+                await bot.send_message(
+                    chat_id=user_id,
+                    text=(
+                        f"⚠️ پرداخت شما تایید شد، اما بروزرسانی حجم روی پنل با خطا مواجه شد.\n\n"
+                        f"📊 حجم ثبت‌شده در سیستم: {remaining_volume} گیگ (ممکن است با پنل هم‌خوان نباشد)\n"
+                        f"لطفاً با پشتیبانی تماس بگیرید تا حجم واقعی کانفیگ شما بررسی و اصلاح شود."
+                    )
+                )
 
         elif req_type == 'charge':
             amount = request_data['amount']
@@ -342,7 +367,7 @@ async def admin_approve_payment(update: Update, context: ContextTypes.DEFAULT_TY
         await query.answer("❌ خطایی رخ داد؛ لاگ سیستم را بررسی کنید.", show_alert=True)
     finally:
         PENDING_PAYMENTS.pop(request_id, None)
-
+        
 async def admin_reject_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """ادمین روی دکمه «❌ رد» فاکتور کلیک کرده است."""
     query = update.callback_query
@@ -741,13 +766,14 @@ async def back_to_plan_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def plan_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Plan selection callback"""
     query = update.callback_query
-    await query.answer()
-    
+    bot = context.bot
+
     plan_type = context.user_data.get('plan_type', 'new')
     protocol = context.user_data.get('selected_protocol', 'v2ray')
-    
+
     # فقط V2Ray مجاز است
     if protocol != "v2ray":
+        await query.answer()
         await query.edit_message_text(
             "❌ این پروتکل در حال حاضر ارائه نمی‌شود.\n\n"
             "لطفاً پروتکل V2Ray | ویتوری را انتخاب کنید.",
@@ -756,7 +782,17 @@ async def plan_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ])
         )
         return
-    
+
+    # ============ بررسی ظرفیت/فعال بودن پنل همین‌جا، قبل از نمایش صفحه پرداخت ============
+    check_type = 'custom_charge' if plan_type == 'custom' else plan_type
+    available, alert_msg, admin_detail = check_plan_availability(check_type)
+    if not available:
+        await notify_admin_plan_unavailable(bot, query, admin_detail, check_type)
+        await query.answer(alert_msg, show_alert=True)
+        return
+
+    await query.answer()
+
     # طرح‌های جدید
     new_plans = [
         {"name": "🟢 متعادل", "price": 259000, "days": 30, "volume": 105, "emoji": "🟢", "daily_volume": 3.5},
@@ -827,15 +863,71 @@ async def plan_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=reply_markup
     )
 
+# ============ Panel Availability Check (Early Stage) ============
+def check_plan_availability(plan_type: str):
+    """
+    بررسی می‌کند که آیا اصلاً پنلی از این plan_type پشتیبانی می‌کند
+    و آیا ظرفیت خالی دارد یا خیر.
+    خروجی: (available: bool, user_message: str, admin_detail: str)
+    """
+    panel_manager = get_panel_manager()
+    all_panels = panel_manager.get_all_panels()
+
+    supporting = [
+        (pid, p) for pid, p in all_panels.items()
+        if p.get('enabled', True) and plan_type in p.get('plan_types', [])
+    ]
+
+    if not supporting:
+        admin_detail = (
+            f"No enabled panel supports plan_type='{plan_type}' — "
+            f"sales for this plan are effectively disabled. Check panel plan_types config."
+        )
+        return False, "❌ فروش این طرح در حال حاضر متوقف شده است. لطفاً طرح دیگری انتخاب کنید.", admin_detail
+
+    panel_data, panel_id = panel_manager.get_panel_for_subscription(plan_type)
+    if not panel_data or not panel_id:
+        usage_lines = ", ".join(
+            f"{p.get('name', pid)} ({panel_manager.panel_usage.get(pid, 0)}/{p.get('max_subscriptions', 100)})"
+            for pid, p in supporting
+        )
+        admin_detail = f"All panels for plan_type='{plan_type}' are full: {usage_lines}"
+        return False, "❌ ظرفیت این طرح در حال حاضر تکمیل شده است (Sold Out). لطفاً بعداً دوباره تلاش کنید.", admin_detail
+
+    return True, "", ""
+
+async def notify_admin_plan_unavailable(bot, query, admin_detail: str, plan_type: str):
+    """ارسال لاگ به ادمین وقتی کاربر با پیام «متوقف شده/سولداوت» مواجه می‌شود"""
+    user = query.from_user
+    await log_panel_error(
+        bot, user.id, f"Plan availability check (plan_type='{plan_type}')", admin_detail,
+        plan_name=None,
+        username=user.username,
+        first_name=user.first_name,
+        last_name=user.last_name
+    )
+    
 @require_membership   
 async def plan_type_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle plan type selection"""
     query = update.callback_query
-    await query.answer()
-    
+    bot = context.bot
+
     plan_type = query.data.replace("plan_type_", "")
+
+    # ============ نگاشت نوع طرح UI به plan_type داخلی پنل‌ها ============
+    check_type = 'custom_charge' if plan_type == 'custom' else plan_type
+
+    # ============ بررسی ظرفیت/فعال بودن پنل همین‌جا، قبل از رفتن به مرحله بعد ============
+    available, alert_msg, admin_detail = check_plan_availability(check_type)
+    if not available:
+        await notify_admin_plan_unavailable(bot, query, admin_detail, check_type)
+        await query.answer(alert_msg, show_alert=True)
+        return
+
+    await query.answer()
     context.user_data['plan_type'] = plan_type
-    
+
     if plan_type == "new":
         # نمایش طرح‌های جدید
         await show_new_plans(update, context)
@@ -1010,8 +1102,17 @@ async def back_to_custom_charge_from_plan(update: Update, context: ContextTypes.
 async def custom_charge_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Buy custom charge plan - show payment method selection"""
     query = update.callback_query
+    bot = context.bot
+
+    # ============ بررسی ظرفیت/فعال بودن پنل همین‌جا، قبل از نمایش صفحه پرداخت ============
+    available, alert_msg, admin_detail = check_plan_availability('custom_charge')
+    if not available:
+        await notify_admin_plan_unavailable(bot, query, admin_detail, 'custom_charge')
+        await query.answer(alert_msg, show_alert=True)
+        return
+
     await query.answer()
-    
+
     user_id = query.from_user.id
     user = db.get_user(user_id)
     balance = user['balance'] if user else 0  # نیاز هست برای نمایش در جزئیات سفارش
@@ -1046,7 +1147,7 @@ async def custom_charge_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"💰 قیمت: {price_str} تومان\n\n"
         f"⏰ مدت: 30 روز\n"
         f"📊 حجم: ۵ گیگ اولیه + امکان افزایش حجم اضافی\n\n"
-        f"💳 موجودی کیف پول: {balance_str} تومان\n\n"  # اینجا نمایش داده میشه
+        f"💳 موجودی کیف پول: {balance_str} تومان\n\n"
         f"لطفاً روش پرداخت را انتخاب کنید:",
         reply_markup=reply_markup
     )
@@ -1228,19 +1329,19 @@ async def extra_volume_pay_wallet(update: Update, context: ContextTypes.DEFAULT_
     """Pay for extra volume with wallet"""
     bot = context.bot
     query = update.callback_query
-    
+
     user_id = query.from_user.id
     user = db.get_user(user_id)
     balance = user['balance'] if user else 0
-    
+
     volume = context.user_data.get('extra_volume')
     price = context.user_data.get('extra_volume_price')
     subscription_id = context.user_data.get('target_subscription_id')
-    
+
     if not volume or not price:
         await query.answer("❌ خطا! لطفا دوباره تلاش کنید.", show_alert=True)
         return ConversationHandler.END
-    
+
     if not subscription_id:
         custom_subs = db.get_custom_charge_subscriptions(user_id)
         if custom_subs:
@@ -1249,18 +1350,23 @@ async def extra_volume_pay_wallet(update: Update, context: ContextTypes.DEFAULT_
         else:
             await query.answer("❌ هیچ اشتراک شارژ دلخواهی یافت نشد!", show_alert=True)
             return ConversationHandler.END
-    
+
     if balance >= price:
         await query.answer("✅ پرداخت با موفقیت انجام شد!")
-        
+
         db.update_balance(user_id, -price)
         db.add_transaction(user_id, -price, "purchase", f"افزایش {volume} گیگ حجم اضافی")
-        
+
         # اضافه کردن حجم به اشتراک مشخص در دیتابیس داخلی
         db.add_volume_to_subscription(subscription_id, volume)
-        
+
         # === بروزرسانی حجم واقعی روی کلاینت در پنل 3xUI - با مقدار کل از دیتابیس ===
         subscription = db.get_subscription(subscription_id)
+
+        # پیش‌فرض موفق؛ اگر اصلاً کلاینتی برای آپدیت روی پنل نبود، مشکلی وجود ندارد
+        panel_success = True
+        panel_msg = ""
+
         if subscription and subscription.get('email'):
             from client_manager import get_panel_client
             panel_client = get_panel_client()
@@ -1271,16 +1377,17 @@ async def extra_volume_pay_wallet(update: Update, context: ContextTypes.DEFAULT_
                 logger.error(
                     f"Failed to update panel volume for {subscription['email']}: {panel_msg}"
                 )
-                await query.message.reply_text(
-                    "⚠️ پرداخت با موفقیت انجام شد و حجم در سیستم داخلی ثبت شد، "
-                    "اما بروزرسانی حجم روی پنل با خطا مواجه شد.\n"
-                    "لطفاً با پشتیبانی تماس بگیرید تا حجم واقعی کانفیگ شما هم بررسی شود."
+                await log_panel_error(
+                    bot, user_id, "Panel volume update", panel_msg,
+                    username=query.from_user.username,
+                    first_name=query.from_user.first_name,
+                    last_name=query.from_user.last_name
                 )
-        
+
         new_balance = balance - price
         price_str = f"{price:,}"
         balance_str = f"{new_balance:,}"
-        
+
         # ============ لاگ افزایش حجم اضافی ============
         await log_volume_added(
             bot, user_id, subscription_id, volume, price, 'کیف پول',
@@ -1288,21 +1395,30 @@ async def extra_volume_pay_wallet(update: Update, context: ContextTypes.DEFAULT_
             first_name=query.from_user.first_name,
             last_name=query.from_user.last_name
         )
-        
+
         # دریافت اطلاعات به‌روز شده اشتراک برای نمایش
         remaining_volume = subscription.get('remaining_volume', 0) if subscription else 0
-        
-        await query.edit_message_text(
-            f"✅ {volume} گیگ حجم اضافی با موفقیت اضافه شد!\n\n"
-            f"🔥 قیمت: {price_str} تومان\n"
-            f"💳 موجودی جدید: {balance_str} تومان\n"
-            f"📊 حجم اشتراک: {remaining_volume} گیگ"
-        )
+
+        if panel_success:
+            await query.edit_message_text(
+                f"✅ {volume} گیگ حجم اضافی با موفقیت اضافه شد!\n\n"
+                f"🔥 قیمت: {price_str} تومان\n"
+                f"💳 موجودی جدید: {balance_str} تومان\n"
+                f"📊 حجم اشتراک: {remaining_volume} گیگ"
+            )
+        else:
+            await query.edit_message_text(
+                f"⚠️ پرداخت انجام شد و {price_str} تومان از کیف پول شما کسر شد،\n"
+                f"اما بروزرسانی حجم روی پنل با خطا مواجه شد.\n\n"
+                f"💳 موجودی جدید: {balance_str} تومان\n\n"
+                f"لطفاً با پشتیبانی تماس بگیرید تا حجم واقعی کانفیگ شما بررسی و اصلاح شود."
+            )
+
         await query.message.reply_text(
             "به منوی اصلی خوش آمدید!",
             reply_markup=get_main_menu()
         )
-        
+
         # پاک کردن داده‌های موقت
         context.user_data.pop('extra_volume', None)
         context.user_data.pop('extra_volume_price', None)
@@ -1314,7 +1430,7 @@ async def extra_volume_pay_wallet(update: Update, context: ContextTypes.DEFAULT_
         price_str = f"{price:,}".replace(",", ".")
         balance_str = f"{balance:,}".replace(",", ".")
         needed_str = f"{needed:,}".replace(",", ".")
-        
+
         alert_text = (
             f"❌ موجودی کیف پول شما کافی نیست!\n\n"
             f"💰 موجودی فعلی: {balance_str} تومان\n"
@@ -1322,7 +1438,7 @@ async def extra_volume_pay_wallet(update: Update, context: ContextTypes.DEFAULT_
             f"⚠️ کسر موجودی: {needed_str} تومان\n\n"
             f"لطفاً از روش کارت به کارت استفاده کنید."
         )
-        
+
         await query.answer(alert_text, show_alert=True)
         return PAYMENT_METHOD
     
@@ -1488,6 +1604,16 @@ async def pay_with_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("❌ خطا! لطفا دوباره تلاش کنید.", show_alert=True)
         return
 
+    # ============ بررسی ظرفیت/فعال بودن پنل همین‌جا، قبل از کسر موجودی ============
+    plan_type_check = selected_plan.get('plan_type', 'old')
+    if selected_plan.get('is_custom_charge', False):
+        plan_type_check = 'custom_charge'
+    available, alert_msg, admin_detail = check_plan_availability(plan_type_check)
+    if not available:
+        await notify_admin_plan_unavailable(bot, query, admin_detail, plan_type_check)
+        await query.answer(alert_msg, show_alert=True)
+        return
+
     price = selected_plan['price']
 
     if balance < price:
@@ -1503,28 +1629,29 @@ async def pay_with_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # === کسر موجودی قبل از ساخت کلاینت ===
     db.update_balance(user_id, -price)
-    db.add_transaction(user_id, -price, "purchase_attempt", 
+    db.add_transaction(user_id, -price, "purchase_attempt",
                       f"تلاش خرید {selected_plan.get('name', 'پلن')}")
 
     await query.answer("⏳ در حال ایجاد اشتراک...")
 
     protocol = context.user_data.get('selected_protocol', 'v2ray')
-    
+
     # ============ CREATE PANEL CLIENT ============
     success, msg, sub_data = await create_subscription_for_purchase(
         user_id=user_id,
         selected_plan=selected_plan,
         protocol=protocol
     )
-    
+
     if not success:
         # === برگرداندن مبلغ در صورت خطا ===
         db.update_balance(user_id, price)
         db.add_transaction(user_id, price, "refund", f"بازگشت وجه - {msg}")
 
-        # ============ لاگ خطای پنل ============
+        # ============ لاگ خطای پنل (سمت ادمین انگلیسی) ============
+        admin_detail = (sub_data or {}).get('admin_error', msg)
         await log_panel_error(
-            bot, user_id, "ایجاد کلاینت (پرداخت با کیف پول)", msg,
+            bot, user_id, "Client creation (wallet payment)", admin_detail,
             plan_name=selected_plan.get('name'),
             username=query.from_user.username,
             first_name=query.from_user.first_name,
@@ -1532,14 +1659,14 @@ async def pay_with_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         if "email already in use" in msg.lower() or "already" in msg.lower():
+            # علت مشخصه: اشتراک از قبل وجود داره — نیازی به تماس با پشتیبانی نیست
             error_text = (
                 "❌ این اشتراک قبلاً برای شما ایجاد شده است.\n\n"
-                "لطفاً از بخش «مشاهده اشتراک‌ها» استفاده کنید یا با پشتیبانی تماس بگیرید."
+                "لطفاً از بخش «مشاهده اشتراک‌ها» استفاده کنید."
             )
         else:
             error_text = (
-                f"❌ خطا در ایجاد کلاینت در پنل!\n\n"
-                f"پیام خطا: {msg}\n\n"
+                f"❌ {msg}\n\n"
                 f"💰 مبلغ {price:,} تومان به کیف پول شما بازگشت داده شد."
             )
 
@@ -1551,7 +1678,7 @@ async def pay_with_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ])
         )
         return
-    
+
     # === موفقیت ===
     db.add_transaction(user_id, -price, "purchase", f"خرید {selected_plan.get('name', '')}")
 
@@ -1581,12 +1708,12 @@ async def pay_with_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
         last_name=query.from_user.last_name
     )
 
-    # ============ افزایش عمر چراغ جاده تونل ============
-    await lifeline.add_day(bot)
+    # ============ افزایش عمر چراغ جاده تونل (+۴ روز برای خرید) ============
+    await lifeline.add_day(bot, amount=4)
 
     # ============ لینک این طرح خریداری‌شده ============
     single_link = get_single_sub_link(subscription_id)
-    link_line = f"\nلینک اشتراک شما (سازگار با نت ملی)\n<code>{single_link}</code>\n" if single_link else ""
+    link_line = f"لینک اشتراک شما:\n<code>{single_link}</code>\n\n" if single_link else ""
 
     keyboard = [
         [InlineKeyboardButton("🔧 دریافت کانفیگ", callback_data=f"get_config_{subscription_id}")],
@@ -1598,9 +1725,9 @@ async def pay_with_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🖥 پنل: {panel_name}\n"
         f"📦 پلن: {plan_display_name}\n"
         f"💰 مبلغ: {price_str} تومان\n"
-        f"💳 موجودی جدید: {balance_str} تومان\n"
-        f"{link_line}\n"
-        f"دریافت کانفیگ همینجا؛ دکمه زیر را بزنید 👇",
+        f"💳 موجودی جدید: {balance_str} تومان\n\n"
+        f"{link_line}"
+        f"دریافت کانفیگ‌ها در تلگرام؛ دکمه زیر را بزنید 👇",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='HTML'
     )
@@ -1610,14 +1737,25 @@ async def pay_with_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop('selected_protocol', None)
     context.user_data.pop('plan_type', None)
     context.user_data.pop('plan_type_name', None)
-        
+    
 async def pay_with_card(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Pay with card - ask for last 4 digits (supports hybrid wallet+card payment)"""
     query = update.callback_query
+    bot = context.bot
 
     selected_plan = context.user_data.get('selected_plan')
     if not selected_plan:
         await query.answer("❌ خطا! لطفا دوباره تلاش کنید.", show_alert=True)
+        return
+
+    # ============ بررسی ظرفیت/فعال بودن پنل همین‌جا، قبل از صدور فاکتور ============
+    plan_type_check = selected_plan.get('plan_type', 'old')
+    if selected_plan.get('is_custom_charge', False):
+        plan_type_check = 'custom_charge'
+    available, alert_msg, admin_detail = check_plan_availability(plan_type_check)
+    if not available:
+        await notify_admin_plan_unavailable(bot, query, admin_detail, plan_type_check)
+        await query.answer(alert_msg, show_alert=True)
         return
 
     price = selected_plan['price']
@@ -1775,12 +1913,12 @@ async def payment_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bot = context.bot
     query = update.callback_query
     await query.answer()
-   
+
     selected_plan = context.user_data.get('selected_plan')
     protocol = context.user_data.get('selected_protocol', 'v2ray')
     user_id = query.from_user.id
     card_digits = context.user_data.get('card_digits', '****')
-   
+
     if not selected_plan:
         await query.answer("❌ خطا! لطفا دوباره تلاش کنید.", show_alert=True)
         return
@@ -1793,17 +1931,17 @@ async def payment_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     if not success:
+        admin_detail = (sub_data or {}).get('admin_error', msg)
         await log_panel_error(
-            bot, user_id, "ایجاد کلاینت (پرداخت کارت به کارت)", msg,
+            bot, user_id, "Client creation (card payment)", admin_detail,
             plan_name=selected_plan.get('name'),
             username=query.from_user.username,
             first_name=query.from_user.first_name,
             last_name=query.from_user.last_name
         )
         await query.edit_message_text(
-            f"❌ خطا در ایجاد کلاینت در پنل!\n\n"
-            f"پیام خطا: {msg}\n\n"
-            f"لطفاً با پشتیبانی تماس بگیرید؛ پرداخت شما ثبت شده و پیگیری خواهد شد.",
+            f"❌ {msg}\n\n"
+            f"پرداخت شما ثبت شده و پیگیری خواهد شد.",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("📨 پشتیبانی", url="https://t.me/jadetunnel")],
                 [InlineKeyboardButton("🔙 بازگشت به منو", callback_data="back_to_main")]
@@ -1815,7 +1953,7 @@ async def payment_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     links = sub_data.get('links', [])
 
     db.add_transaction(user_id, selected_plan['price'], "card_payment", f"پرداخت کارت به کارت - {selected_plan['name']}")
-    
+
     # ============ لاگ پرداخت کارت به کارت ============
     await log_payment_card(
         bot, user_id, selected_plan['name'], selected_plan['price'], card_digits, 'success',
@@ -1824,9 +1962,9 @@ async def payment_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
         last_name=query.from_user.last_name
     )
 
-    # ============ افزایش عمر چراغ جاده تونل ============
-    await lifeline.add_day(bot)
-    
+    # ============ افزایش عمر چراغ جاده تونل (+۴ روز برای خرید) ============
+    await lifeline.add_day(bot, amount=4)
+
     # اگر افزایش حجم اضافی از طریق کارت به کارت است
     extra_volume = context.user_data.get('extra_volume')
     subscription = None
@@ -1846,31 +1984,37 @@ async def payment_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logger.error(
                     f"Failed to update panel volume for {subscription['email']}: {panel_msg}"
                 )
-   
+                await log_panel_error(
+                    bot, user_id, "Panel volume update", panel_msg,
+                    username=query.from_user.username,
+                    first_name=query.from_user.first_name,
+                    last_name=query.from_user.last_name
+                )
+
     price_str = f"{selected_plan['price']:,}".replace(",", ".")
 
     # ============ لینک این طرح خریداری‌شده ============
     single_link = get_single_sub_link(subscription_id)
-    link_line = f"\nلینک اشتراک شما (سازگار با نت ملی)\n<code>{single_link}</code>\n" if single_link else ""
+    link_line = f"لینک اشتراک شما:\n<code>{single_link}</code>\n\n" if single_link else ""
 
     keyboard = [
         [InlineKeyboardButton("🔧 دریافت کانفیگ", callback_data=f"get_config_{subscription_id}")],
         [InlineKeyboardButton("🔙 بازگشت به منو", callback_data="back_to_main")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-   
+
     await query.edit_message_text(
         f"✅ پرداخت شما ثبت شد!\n\n"
         f"🏦 شماره کارت: ****{card_digits}\n"
         f"📦 پلن: {selected_plan['name']}\n"
-        f"💰 مبلغ: {price_str} تومان\n"
-        f"{link_line}\n"
-        f"دریافت کانفیگ همینجا؛ دکمه زیر را بزنید 👇\n\n"
+        f"💰 مبلغ: {price_str} تومان\n\n"
+        f"{link_line}"
+        f"دریافت کانفیگ‌ها در تلگرام؛ دکمه زیر را بزنید 👇\n\n"
         f"📌 در صورت مشکل با پشتیبانی تماس بگیرید.",
         reply_markup=reply_markup,
         parse_mode='HTML'
     )
-    
+
     # پاک کردن داده‌های موقت
     context.user_data.pop('selected_plan', None)
     context.user_data.pop('selected_protocol', None)
@@ -1943,10 +2087,9 @@ async def view_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE)
             plan_type_display = "📦 طرح معمولی"
 
         # ============ نمایش حجم — جدا از تشخیص نام طرح ============
-        # برای شارژ دلخواه و اشتراک‌های دستی که مقدار حجم دارند نشان بده
-        volume_line = ""
+        volume_part = ""
         if sub.get('plan_type') in ('custom_charge', 'manual') and sub.get('remaining_volume', 0):
-            volume_line = f"📊 حجم اشتراک: {sub.get('remaining_volume', 0)} گیگ\n"
+            volume_part = f"📊 حجم اشتراک: {sub.get('remaining_volume', 0)} گیگ\n"
 
         email = sub.get('email', f"{user_id}_{idx}")
         panel_id = sub.get('panel_id')
@@ -1961,27 +2104,25 @@ async def view_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE)
         start_date = str(sub.get('start_date', ''))[:10]
         end_date = str(sub.get('end_date', ''))[:10]
 
-        link_line = f"\nلینک همه طرح‌ها (سازگار با نت ملی)\n<code>{combined_link}</code>\n" if combined_link else ""
-
         # ============ لینک اختصاصی همین طرح ============
         single_link = get_single_sub_link(sub['id'])
-        single_link_line = f"\nلینک این طرح\n<code>{single_link}</code>\n" if single_link else ""
+        single_link_part = f"لینک اشتراک شما:\n<code>{single_link}</code>\n" if single_link else ""
+        combined_link_part = f"لینک اشتراک (تمام کانفیگ‌های موجود)\n<code>{combined_link}</code>\n" if combined_link else ""
 
-        sub_text = f"""
-🔖 اشتراک: {email}
-
-🖥 پنل: {panel_name}
-📌 پروتکل: {protocol_names.get(sub['protocol'], sub['protocol'])}
-📋 نوع طرح: {plan_type_display}
-{volume_line}
-⏰ مدت: {sub['duration_days']} روز
-
-📅 شروع: {start_date}
-📅 انقضا: {end_date}
-✅ وضعیت: فعال
-{link_line}{single_link_line}
-دریافت کانفیگ همینجا؛ دکمه زیر را بزنید 👇
-        """.strip()
+        sub_text = (
+            f"🔖 اشتراک: {email}\n"
+            f"🖥 پنل: {panel_name}\n"
+            f"📌 پروتکل: {protocol_names.get(sub['protocol'], sub['protocol'])}\n"
+            f"📋 نوع طرح: {plan_type_display}\n"
+            f"{volume_part}"
+            f"⏰ مدت: {sub['duration_days']} روز\n"
+            f"📅 شروع: {start_date}\n"
+            f"📅 انقضا: {end_date}\n"
+            f"✅ وضعیت: فعال\n\n"
+            f"{single_link_part}"
+            f"{combined_link_part}\n"
+            f"دریافت کانفیگ‌ها در تلگرام؛ دکمه زیر را بزنید 👇"
+        )
 
         keyboard = [[InlineKeyboardButton("🔧 دریافت کانفیگ", callback_data=f"get_config_{sub['id']}")]]
 
@@ -1991,7 +2132,17 @@ async def view_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE)
             reply_markup=InlineKeyboardMarkup(keyboard),
             disable_web_page_preview=True
         )
-        
+
+def get_combined_sub_link(user_id: int):
+    """لینک اشتراک یکپارچه (شامل همه‌ی طرح‌های فعال کاربر)"""
+    if not user_id:
+        return None
+    token = db.get_or_create_sub_token(user_id)
+    if not token:
+        return None
+    base = get_combined_sub_base_url().rstrip('/')
+    return f"{base}/sub/{token}"
+
 async def send_config_by_priority(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """با زدن دکمه «دریافت کانفیگ»، کانفیگ‌های پنل و کانفیگ‌های دستی ادمین را بر اساس اولویت می‌فرستد"""
     query = update.callback_query
@@ -2735,19 +2886,37 @@ async def emergency_panel_selected(update: Update, context: ContextTypes.DEFAULT
     email = f"{user_id}_emg_{panel_id}"
     inbound_ids = panel_data.get('inbound_ids', [82, 80, 81])
 
+    emergency_volume = get_emergency_plan_volume_gb()
+    emergency_duration = get_emergency_plan_duration_days()
+
     success, msg, client_data = panel_client.create_client(
         email=email,
-        total_gb=EMERGENCY_PLAN_VOLUME_GB,
-        expiry_days=EMERGENCY_PLAN_DURATION_DAYS,
+        total_gb=emergency_volume,
+        expiry_days=emergency_duration,
         inbound_ids=inbound_ids
     )
 
     if not success or not client_data:
+        await log_panel_error(
+            context.bot, user_id, "Emergency client creation", msg,
+            plan_name="Emergency Plan",
+            username=query.from_user.username,
+            first_name=query.from_user.first_name,
+            last_name=query.from_user.last_name
+        )
+        # ============ لاگ شکست ساخت کانفیگ اضطراری ============
+        await log_emergency_config_result(
+            context.bot, user_id, panel_id, panel_data.get('name', panel_id),
+            status='failed', detail=msg,
+            username=query.from_user.username,
+            first_name=query.from_user.first_name,
+            last_name=query.from_user.last_name
+        )
         await query.edit_message_text(
             f"خطا در ساخت اشتراک اضطراری در پنل: {msg}"
         )
         return
-
+    
     links = panel_client.get_client_links(email)
     if not links:
         sub_id = client_data.get('subId')
@@ -2756,12 +2925,21 @@ async def emergency_panel_selected(update: Update, context: ContextTypes.DEFAULT
     db.add_subscription(
         user_id=user_id,
         protocol='v2ray',
-        duration_days=EMERGENCY_PLAN_DURATION_DAYS,
+        duration_days=emergency_duration,    
         plan_type='emergency',
-        initial_volume=EMERGENCY_PLAN_VOLUME_GB,
+        initial_volume=emergency_volume,
         plan_name="طرح اضطراری",
         email=email,
         panel_id=panel_id
+    )
+
+    # ============ لاگ موفقیت ساخت کانفیگ اضطراری ============
+    await log_emergency_config_result(
+        context.bot, user_id, panel_id, panel_data.get('name', panel_id),
+        status='success',
+        username=query.from_user.username,
+        first_name=query.from_user.first_name,
+        last_name=query.from_user.last_name
     )
 
     if links:
@@ -2773,8 +2951,8 @@ async def emergency_panel_selected(update: Update, context: ContextTypes.DEFAULT
     await query.edit_message_text(
         f"اشتراک اضطراری شما با موفقیت ساخته شد!\n\n"
         f"پنل: {panel_data.get('name', panel_id)}\n"
-        f"حجم: {EMERGENCY_PLAN_VOLUME_GB} گیگ\n"
-        f"مدت: {EMERGENCY_PLAN_DURATION_DAYS} روز\n\n"
+        f"حجم: {emergency_volume} گیگ\n"
+        f"مدت: {emergency_duration} روز\n\n"
         f"{config_text}",
         parse_mode='HTML'
     )
@@ -2782,7 +2960,6 @@ async def emergency_panel_selected(update: Update, context: ContextTypes.DEFAULT
         "به منوی اصلی خوش آمدید!",
         reply_markup=get_main_menu()
     )
-    
 # ============ Navigation Handlers ============
 async def back_to_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Back to main menu"""
@@ -3036,12 +3213,11 @@ async def create_subscription_for_purchase(user_id, selected_plan, protocol='v2r
         # تشخیص نوع طرح
         is_custom = selected_plan.get('is_custom_charge', False)
         plan_type = selected_plan.get('plan_type', 'old')
-        
+
         if is_custom:
             plan_type = 'custom_charge'
-        
+
         # Get available panel based on plan type
-        panel_manager = get_panel_manager()
         panel_manager = get_panel_manager()
 
         # ============ بررسی واجد شرایط بودن کاربر برای پنل اختصاصی کمیسیون ============
@@ -3072,16 +3248,17 @@ async def create_subscription_for_purchase(user_id, selected_plan, protocol='v2r
             panel_data, panel_id = panel_manager.get_panel_for_subscription(plan_type)
 
         if not panel_data or not panel_id:
-            return False, "هیچ پنل فعالی با ظرفیت کافی برای این نوع طرح وجود ندارد. با پشتیبانی تماس بگیرید.", None
-        
+            admin_msg = f"No panel available for plan_type='{plan_type}' at creation time (capacity may have changed)."
+            return False, "❌ متاسفانه در حال حاضر امکان ثبت این طرح وجود ندارد. لطفاً دوباره تلاش کنید یا با پشتیبانی تماس بگیرید.", {'admin_error': admin_msg}
+
         # استفاده از PanelClient با panel_id
         panel_client = PanelClient(panel_id)
-        
+
         # Get active subscriptions for user
         subscriptions = db.get_active_subscriptions(user_id)
         sub_number = len(subscriptions) + 1
         email = f"{user_id}_{sub_number}"
-        
+
         if is_custom:
             plan_type = 'custom_charge'
             total_gb = 5
@@ -3100,7 +3277,7 @@ async def create_subscription_for_purchase(user_id, selected_plan, protocol='v2r
             expiry_days=expiry_days,
             inbound_ids=inbound_ids
         )
-        
+
         if success and client_data:
             # Get links after successful creation
             links = panel_client.get_client_links(email)
@@ -3111,7 +3288,7 @@ async def create_subscription_for_purchase(user_id, selected_plan, protocol='v2r
                     links = [f"{panel_base}/sub/{sub_id}"]
                 else:
                     links = []
-            
+
             plan_name = selected_plan.get('name', '')
             initial_volume = 5 if is_custom else 0
 
@@ -3124,9 +3301,9 @@ async def create_subscription_for_purchase(user_id, selected_plan, protocol='v2r
                 initial_volume=initial_volume,
                 plan_name=plan_name,
                 email=email,
-                panel_id=panel_id  # <-- مهم: ذخیره panel_id
+                panel_id=panel_id
             )
-            
+
             return True, msg, {
                 'subscription_id': subscription_id,
                 'email': email,
@@ -3135,10 +3312,14 @@ async def create_subscription_for_purchase(user_id, selected_plan, protocol='v2r
                 'panel_id': panel_id
             }
         else:
-            return False, msg, None
+            return False, msg, {
+                'admin_error': f"Panel error on '{panel_data.get('name', panel_id)}' (create_client): {msg}"
+            }
 
     except Exception as e:
         logger.error(f"Error in create_subscription_for_purchase: {e}")
         import traceback
         traceback.print_exc()
-        return False, f"خطای داخلی: {str(e)}", None
+        return False, f"خطای داخلی: {str(e)}", {
+            'admin_error': f"Exception in create_subscription_for_purchase: {str(e)}"
+        }
