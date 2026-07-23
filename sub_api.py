@@ -226,37 +226,6 @@ async def handle_index(request: web.Request):
         charset="utf-8"
     )
 
-def create_app():
-    init_db()
-    app = web.Application()
-    app.router.add_get('/', handle_index)
-    app.router.add_get('/health', handle_health)
-    app.router.add_get('/sub/single/{token}', handle_sub_single)
-    app.router.add_get('/sub/{token}', handle_sub)
-    app.router.add_get('/api/raw/{token}', handle_raw_configs)
-    app.router.add_get('/api/info/{token}', handle_info)
-    logger.info("✅ Subscription API routes registered")
-    return app
-
-if __name__ == "__main__":
-    protocol = "https" if ENABLE_SSL else "http"
-    print(f"\n🚀 Subscription API starting on {protocol}://{HOST}:{PORT}")
-    print(f"   - /sub/TOKEN   → get subscription link (base64)")
-    print(f"   - /api/raw/TOKEN → get the raw list of configs")
-    print(f"   - /api/info/TOKEN → get user info")
-    if ENABLE_SSL:
-        print(f"🔒 SSL enabled with cert: {SSL_CERT_FILE}")
-    else:
-        print("⚠️ SSL is disabled (no certificate files found)")
-    print("=" * 50)
-
-    if ENABLE_SSL:
-        ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
-        ssl_context.load_cert_chain(SSL_CERT_FILE, SSL_KEY_FILE)
-        web.run_app(create_app(), host=HOST, port=PORT, ssl_context=ssl_context)
-    else:
-        web.run_app(create_app(), host=HOST, port=PORT)
-
 def collect_single_subscription(subscription_id: int):
     """کانفیگ‌ها و جزئیات فقط یک subscription خاص را برمی‌گرداند"""
     sub = db.get_subscription(subscription_id)
@@ -352,3 +321,34 @@ async def handle_sub_single(request: web.Request):
     except Exception:
         logger.error("Error in handle_sub_single:\n" + traceback.format_exc())
         return web.json_response({"error": "internal_error"}, status=500)
+
+def create_app():
+    init_db()
+    app = web.Application()
+    app.router.add_get('/', handle_index)
+    app.router.add_get('/health', handle_health)
+    app.router.add_get('/sub/single/{token}', handle_sub_single)
+    app.router.add_get('/sub/{token}', handle_sub)
+    app.router.add_get('/api/raw/{token}', handle_raw_configs)
+    app.router.add_get('/api/info/{token}', handle_info)
+    logger.info("✅ Subscription API routes registered")
+    return app
+
+if __name__ == "__main__":
+    protocol = "https" if ENABLE_SSL else "http"
+    print(f"\n🚀 Subscription API starting on {protocol}://{HOST}:{PORT}")
+    print(f"   - /sub/TOKEN   → get subscription link (base64)")
+    print(f"   - /api/raw/TOKEN → get the raw list of configs")
+    print(f"   - /api/info/TOKEN → get user info")
+    if ENABLE_SSL:
+        print(f"🔒 SSL enabled with cert: {SSL_CERT_FILE}")
+    else:
+        print("⚠️ SSL is disabled (no certificate files found)")
+    print("=" * 50)
+
+    if ENABLE_SSL:
+        ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+        ssl_context.load_cert_chain(SSL_CERT_FILE, SSL_KEY_FILE)
+        web.run_app(create_app(), host=HOST, port=PORT, ssl_context=ssl_context)
+    else:
+        web.run_app(create_app(), host=HOST, port=PORT)
