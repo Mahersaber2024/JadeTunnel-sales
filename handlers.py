@@ -35,6 +35,7 @@ from bot_settings import (
 )
 
 from panel_manager import get_panel_manager
+import dynamic_plans as dp
 from client_manager import PanelClient, PanelClientFactory, get_panel_client
 from bot_settings import get_combined_sub_base_url 
 # ============ Import Logger Functions ============
@@ -713,8 +714,7 @@ async def protocol_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     protocol = query.data.replace("protocol_", "")
     context.user_data['selected_protocol'] = protocol
-   
-    # === فقط V2Ray مجاز است، اما برای سایر پروتکل‌ها پیام هشدار نمایش می‌دهیم ===
+
     if protocol != "v2ray":
         alert_message = (
             "⚠️ فعلاً فقط پروتکل V2Ray | ویتوری ارائه می‌شود!\n\n"
@@ -722,144 +722,152 @@ async def protocol_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await query.answer(alert_message, show_alert=True)
         return
-    
+
     await query.answer()
-    
-    # نمایش گزینه‌های طرح فروش به صورت کنار هم + دکمه شارژ دلخواه
-    keyboard = [
-        [
-            InlineKeyboardButton("🆕 طرح جدید", callback_data="plan_type_new"),
-            InlineKeyboardButton("📦 طرح قدیمی", callback_data="plan_type_old")
-        ],
-        [InlineKeyboardButton("🔥 طرح شارژ دلخواه", callback_data="plan_type_custom")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(
-        "🎯 انتخاب نوع طرح\n\n"
-        "لطفاً نوع طرح فروش را انتخاب کنید:",
-        reply_markup=reply_markup
-    )
-    
-@require_membership
-async def back_to_plan_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Back to plan type selection"""
-    query = update.callback_query
-    await query.answer()
-    
-    keyboard = [
-        [
-            InlineKeyboardButton("🆕 طرح جدید (پیشنهادی)", callback_data="plan_type_new"),
-            InlineKeyboardButton("📦 طرح قدیمی", callback_data="plan_type_old")
-        ],
-        [InlineKeyboardButton("🔥 طرح شارژ دلخواه", callback_data="plan_type_custom")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
+
+    reply_markup = InlineKeyboardMarkup(_build_plan_type_keyboard())
+
     await query.edit_message_text(
         "🎯 انتخاب نوع طرح\n\n"
         "لطفاً نوع طرح فروش را انتخاب کنید:",
         reply_markup=reply_markup
     )
 
-@require_membership
-async def plan_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Plan selection callback"""
+def _build_plan_type_keyboard():
+    schemes = dp.get_all_schemes(enabled_only=True)
+    buttons = [
+        InlineKeyboardButton(scheme.get('name', scheme_id), callback_data=f"plan_type_{scheme_id}")
+        for scheme_id, scheme in schemes.items()
+    ]
+    buttons.append(InlineKeyboardButton("🔥 طرح شارژ دلخواه", callback_data="plan_type_custom"))
+
+    rows = []
+    row = []
+    for btn in buttons:
+        row.append(btn)
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+
+    return rows
+
+async def show_dynamic_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """نمایش لیست طرح‌های خرید که ادمین ساخته (داینامیک، بدون هیچ طرح ثابتی)"""
     query = update.callback_query
-    bot = context.bot
+    plans = dp.get_all_plans(active_only=True)
 
-    plan_type = context.user_data.get('plan_type', 'new')
-    protocol = context.user_data.get('selected_protocol', 'v2ray')
-
-    # فقط V2Ray مجاز است
-    if protocol != "v2ray":
-        await query.answer()
+    if not plans:
         await query.edit_message_text(
-            "❌ این پروتکل در حال حاضر ارائه نمی‌شود.\n\n"
-            "لطفاً پروتکل V2Ray | ویتوری را انتخاب کنید.",
+            "❌ در حال حاضر هیچ طرحی برای خرید ثبت نشده است.\n"
+            "لطفاً بعداً مراجعه کنید یا با پشتیبانی تماس بگیرید.",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 بازگشت به پروتکل‌ها", callback_data="back_to_protocols")]
+                [InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_protocols")]
             ])
         )
         return
 
-    # ============ بررسی ظرفیت/فعال بودن پنل همین‌جا، قبل از نمایش صفحه پرداخت ============
-    check_type = 'custom_charge' if plan_type == 'custom' else plan_type
-    available, alert_msg, admin_detail = check_plan_availability(check_type)
+    keyboard = []
+    for plan_id, plan in plans.items():
+        price_str = f"{plan['price']:,}"
+        keyboard.append([InlineKeyboardButton(
+            f"{plan['name']} | {price_str} تومان",
+            callback_data=f"plan_dyn_{plan_id}"
+        )])
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_protocols")])
+
+    await query.edit_message_text(
+        "🎯 لطفاً طرح مورد نظر خود را انتخاب کنید:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+@require_membership
+async def plan_dyn_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """کاربر یکی از طرح‌های داینامیک ساخته‌شده توسط ادمین را انتخاب کرده"""
+    query = update.callback_query
+    bot = context.bot
+
+    plan_id = query.data.replace("plan_dyn_", "")
+    plan = dp.get_plan(plan_id)
+    if not plan or not plan.get('enabled', True):
+        await query.answer("❌ این طرح دیگر در دسترس نیست.", show_alert=True)
+        return
+
+    available, alert_msg, admin_detail = check_plan_availability(dp.DYNAMIC_PLAN_TYPE)
     if not available:
-        await notify_admin_plan_unavailable(bot, query, admin_detail, check_type)
+        await notify_admin_plan_unavailable(bot, query, admin_detail, dp.DYNAMIC_PLAN_TYPE)
         await query.answer(alert_msg, show_alert=True)
         return
 
     await query.answer()
 
-    # طرح‌های جدید
-    new_plans = [
-        {"name": "🟢 متعادل", "price": 259000, "days": 30, "volume": 105, "emoji": "🟢", "daily_volume": 3.5},
-        {"name": "🔥 منصفانه", "price": 312000, "days": 30, "volume": 150, "emoji": "🔥", "daily_volume": 5},
-        {"name": "💎 حرفه‌ای", "price": 492000, "days": 30, "volume": 300, "emoji": "💎", "daily_volume": 10}
-    ]
-    
-    # طرح قدیمی
-    old_plan = {"name": "📦 نامحدود تک کاربر", "price": 199000, "days": 30, "volume": 0, "emoji": "📦"}
-    
-    # تشخیص نوع طرح از callback_data
-    callback_data = query.data
-    if callback_data.startswith("plan_new_"):
-        plan_index = int(callback_data.replace("plan_new_", ""))
-        selected_plan = new_plans[plan_index]
-        plan_type_db = 'new'
-    elif callback_data.startswith("plan_old_"):
-        selected_plan = old_plan
-        plan_type_db = 'old'
-    else:
-        # Fallback برای طرح‌های قدیمی
-        plan_index = int(callback_data.replace("plan_", ""))
-        selected_plan = new_plans[plan_index] if plan_index < len(new_plans) else new_plans[0]
-        plan_type_db = 'new'
-    
-    # ذخیره plan_type در selected_plan و context
-    selected_plan['plan_type'] = plan_type_db
+    selected_plan = {
+        'name': plan['name'],
+        'price': plan['price'],
+        'days': plan['days'],
+        'volume': plan.get('volume', 0),
+        'daily_volume': plan.get('daily_volume'),
+        'plan_type': dp.DYNAMIC_PLAN_TYPE,
+        'plan_id': plan_id,
+    }
     context.user_data['selected_plan'] = selected_plan
-    context.user_data['plan_type'] = plan_type_db
-    context.user_data['plan_type_name'] = plan_type_db
-    
+    context.user_data['plan_type'] = dp.DYNAMIC_PLAN_TYPE
+
     user_id = query.from_user.id
     user = db.get_user(user_id)
     balance = user['balance'] if user else 0
-   
-    protocol_names = {
-        "v2ray": "V2Ray | ویتوری"
-    }
-   
-    price_str = f"{selected_plan['price']:,}"
+
+    price_str = f"{plan['price']:,}"
     balance_str = f"{balance:,}"
-    
-    # نمایش حجم روزانه به جای حجم کل
-    if 'daily_volume' in selected_plan:
-        volume_text = f"{selected_plan['daily_volume']} گیگ روزانه"
+    vol = plan.get('volume', 0)
+
+    if plan.get('daily_volume'):
+        volume_text = f"{plan['daily_volume']} گیگ روزانه"
     else:
-        volume_text = f"{selected_plan['volume']} گیگابایت"
-   
-    # دکمه‌های کنار هم (کیف پول و کارت به کارت)
+        volume_text = "نامحدود" if not vol else f"{vol} گیگابایت"
+
+    desc_line = f"📝 {plan['description']}\n\n" if plan.get('description') else ""
+
     keyboard = [
         [
             InlineKeyboardButton("💰 کیف پول", callback_data="pay_wallet"),
             InlineKeyboardButton("🏦 کارت به کارت", callback_data="pay_card")
         ],
-        [InlineKeyboardButton("🔙 بازگشت به پلن‌ها", callback_data="back_to_plans")]
+        [InlineKeyboardButton("🔙 بازگشت به پلن‌ها", callback_data="back_to_dyn_category")]
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-   
+
     await query.edit_message_text(
         f"📋 جزئیات سفارش:\n\n"
-        f"🔄 پروتکل: {protocol_names.get(protocol, protocol)}\n"
-        f"📦 پلن انتخابی: {selected_plan['name']}\n\n"
-        f"💰 قیمت: {price_str} تومان\n\n"
-        f"⏰ مدت: {selected_plan['days']} روز\n"
+        f"📦 پلن انتخابی: {plan['name']}\n"
+        f"{desc_line}"
+        f"💰 قیمت: {price_str} تومان\n"
+        f"⏰ مدت: {plan['days']} روز\n"
         f"📊 حجم: {volume_text}\n\n"
         f"💳 موجودی کیف پول: {balance_str} تومان\n\n"
         f"لطفاً روش پرداخت را انتخاب کنید:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+@require_membership
+async def back_to_dyn_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """بازگشت از صفحه‌ی جزئیات سفارش یک پلن داینامیک، به همان لیست طرح"""
+    query = update.callback_query
+    await query.answer()
+    category = context.user_data.get('dyn_category', 'new')
+    await show_plans_for_scheme(update, context, category)
+
+@require_membership
+async def back_to_plan_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Back to plan type selection"""
+    query = update.callback_query
+    await query.answer()
+
+    reply_markup = InlineKeyboardMarkup(_build_plan_type_keyboard())
+
+    await query.edit_message_text(
+        "🎯 انتخاب نوع طرح\n\n"
+        "لطفاً نوع طرح فروش را انتخاب کنید:",
         reply_markup=reply_markup
     )
 
@@ -916,7 +924,14 @@ async def plan_type_selected(update: Update, context: ContextTypes.DEFAULT_TYPE)
     plan_type = query.data.replace("plan_type_", "")
 
     # ============ نگاشت نوع طرح UI به plan_type داخلی پنل‌ها ============
-    check_type = 'custom_charge' if plan_type == 'custom' else plan_type
+    # طرح‌های "جدید" و "قدیمی" هر دو الان طرح‌های داینامیک هستند و از نظر
+    # ساخت کلاینت روی پنل، هر دو زیر همان DYNAMIC_PLAN_TYPE ('custom_plan')
+    # قرار می‌گیرند — نه زیر 'new'/'old' خام. فقط «شارژ دلخواه» یک plan_type
+    # مستقل و واقعی پنل است.
+    if plan_type == 'custom':
+        check_type = 'custom_charge'
+    else:
+        check_type = dp.DYNAMIC_PLAN_TYPE
 
     # ============ بررسی ظرفیت/فعال بودن پنل همین‌جا، قبل از رفتن به مرحله بعد ============
     available, alert_msg, admin_detail = check_plan_availability(check_type)
@@ -928,15 +943,14 @@ async def plan_type_selected(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.answer()
     context.user_data['plan_type'] = plan_type
 
-    if plan_type == "new":
-        # نمایش طرح‌های جدید
-        await show_new_plans(update, context)
-    elif plan_type == "old":
-        # نمایش طرح قدیمی
-        await show_old_plan(update, context)
-    elif plan_type == "custom":
+    if plan_type == "custom":
         # هدایت به طرح شارژ دلخواه
         await custom_charge_from_plan(update, context)
+    else:
+        # هر طرح دیگری (چه دو طرح پیش‌فرض «جدید»/«قدیمی»، چه طرح‌های
+        # داینامیکی که ادمین بعداً از «🗂 مدیریت طرح‌ها» ساخته) از همین
+        # مسیر یکسان عبور می‌کند — چیزی در کد هاردکد نیست.
+        await show_plans_for_scheme(update, context, plan_type)
         
 @require_membership
 async def custom_charge_from_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -971,70 +985,86 @@ async def custom_charge_from_plan(update: Update, context: ContextTypes.DEFAULT_
         disable_web_page_preview=True
     )
 
-@require_membership
-async def show_old_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show old plan option"""
+async def _show_dynamic_plans_by_category(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                                           category: str, title: str, empty_text: str):
+    """
+    نمایش لیست طرح‌های داینامیک (ساخته‌شده توسط ادمین در admin_dynamic_plans.py)
+    که فیلد category آن‌ها برابر است با category ورودی ('new' یا 'old').
+    جایگزین لیست‌های ثابت/هاردکد قبلی شده تا واقعاً از طرح‌هایی که ادمین
+    از داخل ربات می‌سازد استفاده شود.
+    """
     query = update.callback_query
-    
-    old_plan = {"name": "نامحدود تک کاربر", "price": 199000, "days": 30, "volume": 0, "emoji": "📦"}
-    
-    keyboard = [
-        [InlineKeyboardButton(
-            f"📦 {old_plan['name']} | ۱۹۹,۰۰۰ تومان",
-            callback_data="plan_old_0"
-        )],
-        [InlineKeyboardButton("🔙 بازگشت به انتخاب طرح", callback_data="back_to_plan_type")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
+    context.user_data['dyn_category'] = category
+
+    all_plans = dp.get_all_plans(active_only=True)
+    plans = {pid: p for pid, p in all_plans.items() if p.get('category', 'new') == category}
+
+    if not plans:
+        await query.edit_message_text(
+            empty_text,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 بازگشت به انتخاب طرح", callback_data="back_to_plan_type")]
+            ])
+        )
+        return
+
+    keyboard = []
+    for plan_id, plan in plans.items():
+        price_str = f"{plan['price']:,}"
+        keyboard.append([InlineKeyboardButton(
+            f"{plan['name']} | {price_str} تومان",
+            callback_data=f"plan_dyn_{plan_id}"
+        )])
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت به انتخاب طرح", callback_data="back_to_plan_type")])
+
     await query.edit_message_text(
-        f"📦 طرح قدیمی\n\n"
-        f"نامحدود تک کاربر → ۱۹۹,۰۰۰ تومان\n"
-        f"(بعضی اپراتورها اختلال دارد)\n\n"
-        f"⚠️ توجه: این طرح محدودیت تعداد کاربر دارد\n\n"
-        f'<a href="https://t.me/jadetunnell/13">جزئیات بیشتر</a>',
-        reply_markup=reply_markup,
+        title,
+        reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='HTML',
         disable_web_page_preview=True
     )
 
+
+async def show_plans_for_scheme(update: Update, context: ContextTypes.DEFAULT_TYPE, scheme_id: str):
+    scheme = dp.get_scheme(scheme_id)
+    scheme_name = scheme.get('name') if scheme else '📦 طرح'
+    scheme_desc = scheme.get('description') if scheme else ''
+    footer_text = dp.get_scheme_footer_text(scheme_id)
+
+    title = f"{scheme_name}\n\n"
+    if scheme_desc:
+        title += f"{scheme_desc}\n\n"
+    title += footer_text
+
+    empty_text = (
+        f"❌ در حال حاضر هیچ پلنی در «{scheme_name}» ثبت نشده است.\n"
+        "لطفاً طرح دیگری انتخاب کنید یا بعداً مراجعه کنید."
+    )
+
+    await _show_dynamic_plans_by_category(
+        update, context, category=scheme_id,
+        title=title, empty_text=empty_text
+    )
+
+@require_membership
+async def show_old_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """نگه‌داشته‌شده برای سازگاری با فراخوانی‌های قدیمی؛ معادل طرح پیش‌فرض «قدیمی»"""
+    await show_plans_for_scheme(update, context, 'old')
+
+
+@require_membership
+async def back_to_old_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """بازگشت از صفحه‌ی جزئیات سفارش، به صفحه‌ی طرح قدیمی"""
+    query = update.callback_query
+    await query.answer()
+    await show_old_plan(update, context)
+
+
 @require_membership
 async def show_new_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show new plan options"""
-    query = update.callback_query
-    protocol = context.user_data.get('selected_protocol', 'v2ray')
-    
-    # طرح‌های جدید
-    new_plans = [
-        {"name": "🟢 متعادل", "price": 259000, "days": 30, "volume": 105, "emoji": "🟢", "daily_volume": 3.5},
-        {"name": "🔥 منصفانه", "price": 312000, "days": 30, "volume": 150, "emoji": "🔥", "daily_volume": 5},
-        {"name": "💎 حرفه‌ای", "price": 492000, "days": 30, "volume": 300, "emoji": "💎", "daily_volume": 10}
-    ]
-    
-    keyboard = []
-    for i, plan in enumerate(new_plans):
-        price_str = f"{plan['price']:,}"
-        keyboard.append([
-            InlineKeyboardButton(
-                f"{plan['emoji']} {plan['name']} | {price_str} تومان",
-                callback_data=f"plan_new_{i}"
-            )
-        ])
-    
-    keyboard.append([InlineKeyboardButton("🔙 بازگشت به انتخاب طرح", callback_data="back_to_plan_type")])
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(
-        f"نامحدود\n"
-        f"سرعت عالی + پایداری بالا + بدون اختلال در اپراتورها\n"
-        f"🔓 بدون محدودیت تعداد کاربر | 📅 ماهانه\n\n"
-        f"لطفاً پلن مورد نظر را انتخاب کنید:\n\n"
-        f'<a href="https://t.me/jadetunnell/13">جزئیات بیشتر</a>',  # <-- لینک صحیح رو جایگزین کن
-        reply_markup=reply_markup,
-        parse_mode='HTML',
-        disable_web_page_preview=True
-    )
-    
+    """نگه‌داشته‌شده برای سازگاری با فراخوانی‌های قدیمی؛ معادل طرح پیش‌فرض «جدید»"""
+    await show_plans_for_scheme(update, context, 'new')
+
 @require_membership
 async def add_extra_volume_from_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Add extra volume from plan page - shows subscription selection if multiple"""
@@ -2073,7 +2103,10 @@ async def view_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE)
             "v2ray": "V2Ray | ویتوری"
         }
 
-        if sub.get('plan_name'):
+        # ============ اولویت با plan_type، مخصوصاً برای طرح اضطراری ============
+        if sub.get('plan_type') == 'emergency':
+            plan_type_display = "🆘 طرح اضطراری"
+        elif sub.get('plan_name'):
             plan_type_display = sub.get('plan_name')
         elif sub.get('plan_type') == 'custom_charge':
             plan_type_display = "🔥 طرح شارژ دلخواه"
@@ -2132,7 +2165,6 @@ async def view_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE)
             reply_markup=InlineKeyboardMarkup(keyboard),
             disable_web_page_preview=True
         )
-
 def get_combined_sub_link(user_id: int):
     """لینک اشتراک یکپارچه (شامل همه‌ی طرح‌های فعال کاربر)"""
     if not user_id:
@@ -2180,19 +2212,18 @@ async def send_config_by_priority(update: Update, context: ContextTypes.DEFAULT_
     ordered_groups = group_combined_links(panel_links, manual_configs)
 
     priority_labels = [
-        "الویت اول 👇🏻",
-        "الویت دوم(برای زمانی که اختلال نت زیاده) 👇🏻",
+        "اولویت اول 👇🏻",
+        "اولویت دوم(برای زمانی که اختلال نت زیاده) 👇🏻",
     ]
 
     for i, (_, links_list) in enumerate(ordered_groups):
-        label = priority_labels[i] if i < len(priority_labels) else f"الویت {i+1} 👇🏻"
+        label = priority_labels[i] if i < len(priority_labels) else f"اولویت {i+1} 👇🏻"
         config_lines = "\n".join(f"<code>{l}</code>" for l in links_list)
         await query.message.reply_text(
             f"{label}\n\n{config_lines}",
             parse_mode='HTML',
             disable_web_page_preview=True
         )
-
 
 def group_combined_links(panel_links: list, manual_configs: list) -> list:
     """
@@ -2883,7 +2914,9 @@ async def emergency_panel_selected(update: Update, context: ContextTypes.DEFAULT
     await query.edit_message_text("در حال ساخت اشتراک اضطراری...")
 
     panel_client = PanelClient(panel_id)
-    email = f"{user_id}_emg_{panel_id}"
+    existing_emergency_count = len(db.get_emergency_panel_ids(user_id))
+    email = f"{user_id}_emg{existing_emergency_count + 1}"
+
     inbound_ids = panel_data.get('inbound_ids', [82, 80, 81])
 
     emergency_volume = get_emergency_plan_volume_gb()
@@ -2916,19 +2949,15 @@ async def emergency_panel_selected(update: Update, context: ContextTypes.DEFAULT
             f"خطا در ساخت اشتراک اضطراری در پنل: {msg}"
         )
         return
-    
-    links = panel_client.get_client_links(email)
-    if not links:
-        sub_id = client_data.get('subId')
-        links = [f"{panel_client.panel_base}/sub/{sub_id}"] if sub_id else []
 
-    db.add_subscription(
+    # ============ ثبت اشتراک در دیتابیس و دریافت subscription_id ============
+    subscription_id = db.add_subscription(
         user_id=user_id,
         protocol='v2ray',
-        duration_days=emergency_duration,    
+        duration_days=emergency_duration,
         plan_type='emergency',
         initial_volume=emergency_volume,
-        plan_name="طرح اضطراری",
+        plan_name="طرح اضطراری🆘",
         email=email,
         panel_id=panel_id
     )
@@ -2942,24 +2971,25 @@ async def emergency_panel_selected(update: Update, context: ContextTypes.DEFAULT
         last_name=query.from_user.last_name
     )
 
-    if links:
-        lines = "\n\n".join(f"کانفیگ {i+1}:\n<code>{l}</code>" for i, l in enumerate(links))
-        config_text = f"لینک‌های اشتراک شما ({len(links)} عدد):\n\n{lines}"
-    else:
-        config_text = f"شناسه اشتراک: <code>{email}</code>"
+    # ============ لینک اشتراک اختصاصی این کانفیگ اضطراری ============
+    single_link = get_single_sub_link(subscription_id)
+    link_line = f"لینک اشتراک شما:\n<code>{single_link}</code>\n\n" if single_link else ""
+
+    keyboard = []
+    if subscription_id:
+        keyboard.append([InlineKeyboardButton("🔧 دریافت کانفیگ", callback_data=f"get_config_{subscription_id}")])
 
     await query.edit_message_text(
-        f"اشتراک اضطراری شما با موفقیت ساخته شد!\n\n"
-        f"پنل: {panel_data.get('name', panel_id)}\n"
-        f"حجم: {emergency_volume} گیگ\n"
-        f"مدت: {emergency_duration} روز\n\n"
-        f"{config_text}",
-        parse_mode='HTML'
+        f"✅ اشتراک اضطراری شما با موفقیت ساخته شد!\n\n"
+        f"🖥 پنل: {panel_data.get('name', panel_id)}\n"
+        f"📊 حجم: {emergency_volume} گیگ\n"
+        f"⏰ مدت: {emergency_duration} روز\n\n"
+        f"{link_line}"
+        f"دریافت کانفیگ‌ها در تلگرام؛ دکمه زیر را بزنید 👇",
+        parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None
     )
-    await query.message.reply_text(
-        "به منوی اصلی خوش آمدید!",
-        reply_markup=get_main_menu()
-    )
+    
 # ============ Navigation Handlers ============
 async def back_to_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Back to main menu"""
@@ -3060,10 +3090,10 @@ async def view_subscriptions_callback(update: Update, context: ContextTypes.DEFA
     """View subscriptions callback - fetch links from panel API"""
     query = update.callback_query
     await query.answer()
-   
+
     user_id = query.from_user.id
     subscriptions = db.get_active_subscriptions(user_id)
-   
+
     if not subscriptions:
         await query.edit_message_text(
             "📒 لیست اشتراک‌های شما:\n\n"
@@ -3072,7 +3102,7 @@ async def view_subscriptions_callback(update: Update, context: ContextTypes.DEFA
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛒 خرید VPN", callback_data="buy_vpn")]])
         )
         return
-    
+
     text = "📒 لیست اشتراک‌های فعال شما:\n\n"
     for i, sub in enumerate(subscriptions, 1):
         protocol_names = {
@@ -3080,9 +3110,11 @@ async def view_subscriptions_callback(update: Update, context: ContextTypes.DEFA
             "openvpn": "OpenVPN",
             "v2ray": "V2Ray | ویتوری"
         }
-        
-        # تشخیص نام نمایشی طرح
-        if sub.get('plan_name'):
+
+        # ============ اولویت با plan_type، مخصوصاً برای طرح اضطراری ============
+        if sub.get('plan_type') == 'emergency':
+            plan_type_display = "🆘 طرح اضطراری"
+        elif sub.get('plan_name'):
             plan_type_display = sub.get('plan_name')
         elif sub.get('plan_type') == 'custom_charge':
             plan_type_display = "🔥 شارژ دلخواه"
@@ -3094,19 +3126,18 @@ async def view_subscriptions_callback(update: Update, context: ContextTypes.DEFA
             plan_type_display = "📦 معمولی"
 
         # ============ نمایش حجم — جدا از نام طرح ============
-        # برای شارژ دلخواه، دستی، و هر طرحی که remaining_volume دارد نشان بده
         volume_suffix = ""
         if sub.get('plan_type') in ('custom_charge', 'manual') and sub.get('remaining_volume', 0):
             volume_suffix = f" - حجم اشتراک: {sub.get('remaining_volume', 0)} گیگ"
-        
+
         text += f"{i}. {protocol_names.get(sub['protocol'], sub['protocol'])} - {plan_type_display} - {sub['duration_days']} روز - تا {sub['end_date']}{volume_suffix}\n"
-   
+
     await query.edit_message_text(
         text,
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_main")]])
     )
-# ============ Create VPN Client in 3xUI Panel with Subscription Link ============
 
+# ============ Create VPN Client in 3xUI Panel with Subscription Link ============
 async def create_panel_client_and_get_link(email, total_gb, expiry_days, inbound_ids=None, plan_type='old'):
     """
     Create a client in 3xUI panel and get ALL subscription links (one per inbound)
@@ -3264,6 +3295,8 @@ async def create_subscription_for_purchase(user_id, selected_plan, protocol='v2r
             total_gb = 5
         elif plan_type == 'old':
             total_gb = 0
+        elif plan_type == dp.DYNAMIC_PLAN_TYPE:
+            total_gb = selected_plan.get('volume', 0)
         else:
             daily_volume = selected_plan.get('daily_volume', 0)
             total_gb = 4 if daily_volume == 3.5 else int(daily_volume)
