@@ -304,6 +304,24 @@ class Database:
             if cursor:
                 cursor.close()
     
+    def get_all_user_ids(self):
+        """
+        لیست user_id تمام کاربران ثبت‌شده در ربات را برمی‌گرداند.
+        برای قابلیت «ارسال طرح به همه کاربران» توسط ادمین استفاده می‌شود.
+        """
+        cursor = None
+        try:
+            cursor = self.get_cursor()
+            cursor.execute("SELECT user_id FROM users ORDER BY user_id")
+            rows = cursor.fetchall()
+            return [row['user_id'] for row in rows]
+        except Exception as e:
+            logger.error(f"Error getting all user ids: {e}")
+            return []
+        finally:
+            if cursor:
+                cursor.close()
+
     def update_balance(self, user_id: int, amount: int):
         """Update user balance"""
         cursor = None
@@ -639,7 +657,52 @@ class Database:
         """, (volume_gb, subscription_id))
         self.conn.commit()
         return cursor.rowcount > 0
+    def update_subscription_duration(self, subscription_id: int, duration_days: int) -> bool:
+        """مدت اشتراک را تغییر می‌دهد؛ end_date بر اساس start_date دوباره محاسبه می‌شود"""
+        cursor = None
+        try:
+            cursor = self.get_cursor()
+            cursor.execute("SELECT start_date FROM subscriptions WHERE id = %s", (subscription_id,))
+            row = cursor.fetchone()
+            if not row:
+                return False
+            start_date = row['start_date']
+            new_end_date = start_date + timedelta(days=duration_days)
+            cursor.execute(
+                "UPDATE subscriptions SET duration_days = %s, end_date = %s WHERE id = %s",
+                (duration_days, new_end_date, subscription_id)
+            )
+            self.conn.commit()
+            return cursor.rowcount > 0
+        except Exception as e:
+            logger.error(f"Error updating subscription duration: {e}")
+            if self.conn:
+                self.conn.rollback()
+            return False
+        finally:
+            if cursor:
+                cursor.close()
 
+    def set_subscription_volume(self, subscription_id: int, volume_gb: int) -> bool:
+        """حجم اشتراک را به مقدار مشخص (مطلق، نه افزایشی) تنظیم می‌کند"""
+        cursor = None
+        try:
+            cursor = self.get_cursor()
+            cursor.execute(
+                "UPDATE subscriptions SET remaining_volume = %s WHERE id = %s",
+                (volume_gb, subscription_id)
+            )
+            self.conn.commit()
+            return cursor.rowcount > 0
+        except Exception as e:
+            logger.error(f"Error setting subscription volume: {e}")
+            if self.conn:
+                self.conn.rollback()
+            return False
+        finally:
+            if cursor:
+                cursor.close()
+                
     def get_subscription(self, subscription_id):
         cursor = self.conn.cursor()
         cursor.execute("""
@@ -1144,3 +1207,39 @@ class Database:
         finally:
             if cursor:
                 cursor.close()
+
+def get_all_active_plan_names(self):
+    """لیست نام‌های طرح یکتا در بین تمام اشتراک‌های فعال (برای انتخاب طرح در عملیات گروهی)"""
+    cursor = None
+    try:
+        cursor = self.get_cursor()
+        cursor.execute(
+            "SELECT DISTINCT plan_name FROM subscriptions "
+            "WHERE status = 'active' AND end_date > NOW() AND plan_name IS NOT NULL "
+            "ORDER BY plan_name"
+        )
+        return [r['plan_name'] for r in cursor.fetchall()]
+    except Exception as e:
+        logger.error(f"Error getting active plan names: {e}")
+        return []
+    finally:
+        if cursor:
+            cursor.close()
+
+def get_active_subscriptions_by_plan_name(self, plan_name: str):
+    """همه اشتراک‌های فعال با یک plan_name مشخص (برای افزودن کانفیگ گروهی)"""
+    cursor = None
+    try:
+        cursor = self.get_cursor()
+        cursor.execute(
+            "SELECT * FROM subscriptions WHERE plan_name = %s "
+            "AND status = 'active' AND end_date > NOW()",
+            (plan_name,)
+        )
+        return cursor.fetchall()
+    except Exception as e:
+        logger.error(f"Error getting subscriptions by plan name: {e}")
+        return []
+    finally:
+        if cursor:
+            cursor.close()
