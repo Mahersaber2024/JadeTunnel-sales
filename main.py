@@ -18,6 +18,8 @@ from telegram.ext import (
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from handlers import admin_approve_payment, admin_reject_payment
+import admin_dynamic_plans as adp
+import admin_send_plan as asp
 
 import lifeline
 from bot_settings import get_sponsor_channel
@@ -25,6 +27,7 @@ from bot_settings import get_sponsor_channel
 from datetime import time as dt_time
 from zoneinfo import ZoneInfo
 import daily_reset
+from Autoscanner import admin_autoscanner as aas
 
 from config import config
 from database import Database
@@ -56,6 +59,10 @@ from admin import (
     ADMIN_EMERGENCY_DURATION_INPUT,    # <-- جدید
     ADMIN_MANUAL_SUB_PRIORITY,
     ADMIN_MANUAL_SUB_CONFIG,
+    ADMIN_USERINFO_ID,
+    ADMIN_MANUAL_SUB_TARGET, 
+    ADMIN_ADDCONFIG_TARGET, 
+    ADMIN_ADDCONFIG_PLAN_SELECT, 
     set_db as set_admin_db,
     set_admin_ids,
     is_admin,
@@ -152,11 +159,26 @@ from admin import (
     admin_addconfig_link_input,
     admin_lifeline_settings_menu,
     admin_lifeline_toggle,
-    admin_emergency_plan_settings_menu,   # <-- جدید
-    admin_emergency_edit_volume_start,    # <-- جدید
-    admin_emergency_edit_volume_input,    # <-- جدید
-    admin_emergency_edit_duration_start,  # <-- جدید
-    admin_emergency_edit_duration_input,  # <-- جدید
+    admin_emergency_plan_settings_menu,
+    admin_emergency_edit_volume_start,
+    admin_emergency_edit_volume_input,
+    admin_emergency_edit_duration_start,
+    admin_emergency_edit_duration_input,
+    ADMIN_EDITSUB_USER_ID,          # <-- اضافه کنید
+    ADMIN_EDITSUB_SELECT,           # <-- اضافه کنید
+    ADMIN_EDITSUB_DURATION_INPUT,   # <-- اضافه کنید
+    ADMIN_EDITSUB_VOLUME_INPUT,     # <-- اضافه کنید
+    admin_editsub_start,
+    admin_editsub_user_id,
+    admin_editsub_select,
+    admin_editsub_field_selected,
+    admin_editsub_duration_input,
+    admin_editsub_volume_input,
+    admin_userinfo_start,
+    admin_userinfo_show,
+    admin_manual_sub_target_selected, 
+    admin_addconfig_target_selected, 
+    admin_addconfig_plan_selected,
     set_get_main_menu
 )
 
@@ -267,6 +289,7 @@ def main():
         daily_reset.set_db(db)
         set_admin_db(db)
         send_gift.set_db(db)
+        asp.set_db(db)
         lifeline.set_db(db)
         lifeline.set_channel(get_sponsor_channel())
         print("✅ Database connected successfully!")
@@ -277,9 +300,14 @@ def main():
     # Initialize admin list
     admin_ids = config.get_admin_ids()
     set_admin_ids(admin_ids)
-    
+    aas.set_is_admin(is_admin)
+    aas.set_get_main_menu(handlers.get_main_menu)
+    adp.set_is_admin(is_admin)   # <-- اضافه شد (۳.۲)
+    asp.set_is_admin(is_admin)
     set_get_main_menu(handlers.get_main_menu)
     send_gift.set_get_main_menu(handlers.get_main_menu)
+    asp.set_get_main_menu(handlers.get_main_menu)
+    asp.set_purchase_deps(handlers.create_subscription_for_purchase, handlers.get_single_sub_link)
 
     token = config.get('bot_token')
     if not token:
@@ -298,6 +326,107 @@ def main():
     # ====================== Handlers ======================
     application.add_handler(CommandHandler("start", handlers.start))
     application.add_handler(CommandHandler("admin", admin_panel))
+
+    # ============ AutoScanner Handlers ============
+    application.add_handler(CallbackQueryHandler(aas.admin_autoscanner_menu, pattern="^admin_autoscanner_menu$"))
+    application.add_handler(CallbackQueryHandler(aas.autoscanner_zones_menu, pattern="^autoscanner_zones_menu$"))
+    application.add_handler(CallbackQueryHandler(aas.autoscanner_records_menu, pattern="^autoscanner_records_menu$"))
+    application.add_handler(CallbackQueryHandler(aas.autoscanner_toggle, pattern="^autoscanner_toggle$"))
+    application.add_handler(CallbackQueryHandler(aas.autoscanner_run_menu, pattern="^autoscanner_run_menu$"))
+    application.add_handler(CallbackQueryHandler(aas.autoscanner_runsel_toggle, pattern="^autoscanner_runsel_toggle_"))
+    application.add_handler(CallbackQueryHandler(aas.autoscanner_runsel_all, pattern="^autoscanner_runsel_all$"))
+    application.add_handler(CallbackQueryHandler(aas.autoscanner_runsel_none, pattern="^autoscanner_runsel_none$"))
+    application.add_handler(CallbackQueryHandler(aas.autoscanner_runsel_start, pattern="^autoscanner_runsel_start$"))
+    application.add_handler(CallbackQueryHandler(aas.autoscanner_zone_delete, pattern="^autoscanner_zone_del_"))
+    application.add_handler(CallbackQueryHandler(aas.autoscanner_record_delete, pattern="^autoscanner_record_del_"))
+
+    # Matches the "❌ Cancel" reply-keyboard button shown (in place of the main menu)
+    # while an AutoScanner conversation is waiting for text input.
+    autoscanner_cancel_button = MessageHandler(filters.Regex(f"^{aas.CANCEL_BUTTON_TEXT}$"), admin_cancel)
+
+    autoscanner_token_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(aas.autoscanner_token_edit_start, pattern="^autoscanner_token_edit$")],
+        states={
+            aas.AUTOSCANNER_TOKEN_INPUT: [
+                CommandHandler("cancel", admin_cancel),
+                autoscanner_cancel_button,
+                MessageHandler(filters.TEXT & ~filters.COMMAND, aas.autoscanner_token_edit_input)
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", admin_cancel), autoscanner_cancel_button]
+    )
+    application.add_handler(autoscanner_token_conv)
+
+    autoscanner_zone_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(aas.autoscanner_zone_add_start, pattern="^autoscanner_zone_add$")],
+        states={
+            aas.AUTOSCANNER_ZONE_INPUT: [
+                CommandHandler("cancel", admin_cancel),
+                autoscanner_cancel_button,
+                MessageHandler(filters.TEXT & ~filters.COMMAND, aas.autoscanner_zone_add_input)
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", admin_cancel), autoscanner_cancel_button]
+    )
+    application.add_handler(autoscanner_zone_conv)
+
+    autoscanner_record_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(aas.autoscanner_record_add_start, pattern="^autoscanner_record_add$")],
+        states={
+            aas.AUTOSCANNER_RECORD_INPUT: [
+                CommandHandler("cancel", admin_cancel),
+                autoscanner_cancel_button,
+                MessageHandler(filters.TEXT & ~filters.COMMAND, aas.autoscanner_record_add_input)
+            ],
+            aas.AUTOSCANNER_RECORD_ZONE_SELECT: [
+                CallbackQueryHandler(aas.autoscanner_record_zone_selected, pattern="^autoscanner_recordzone_"),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", admin_cancel), autoscanner_cancel_button]
+    )
+    application.add_handler(autoscanner_record_conv)
+
+    autoscanner_record_bulk_add_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(aas.autoscanner_record_bulk_add_start, pattern="^autoscanner_record_bulk_add$")],
+        states={
+            aas.AUTOSCANNER_RECORD_BULK_ADD_INPUT: [
+                CommandHandler("cancel", admin_cancel),
+                autoscanner_cancel_button,
+                MessageHandler(filters.TEXT & ~filters.COMMAND, aas.autoscanner_record_bulk_add_input)
+            ],
+            aas.AUTOSCANNER_RECORD_BULK_ADD_ZONE_SELECT: [
+                CallbackQueryHandler(aas.autoscanner_record_bulk_zone_selected, pattern="^autoscanner_bulkzone_"),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", admin_cancel), autoscanner_cancel_button]
+    )
+    application.add_handler(autoscanner_record_bulk_add_conv)
+
+    autoscanner_record_bulk_delete_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(aas.autoscanner_record_bulk_delete_start, pattern="^autoscanner_record_bulk_delete$")],
+        states={
+            aas.AUTOSCANNER_RECORD_BULK_DELETE_INPUT: [
+                CommandHandler("cancel", admin_cancel),
+                autoscanner_cancel_button,
+                MessageHandler(filters.TEXT & ~filters.COMMAND, aas.autoscanner_record_bulk_delete_input)
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", admin_cancel), autoscanner_cancel_button]
+    )
+    application.add_handler(autoscanner_record_bulk_delete_conv)
+
+    autoscanner_interval_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(aas.autoscanner_interval_edit_start, pattern="^autoscanner_interval_edit$")],
+        states={
+            aas.AUTOSCANNER_INTERVAL_INPUT: [
+                CommandHandler("cancel", admin_cancel),
+                autoscanner_cancel_button,
+                MessageHandler(filters.TEXT & ~filters.COMMAND, aas.autoscanner_interval_edit_input)
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", admin_cancel), autoscanner_cancel_button]
+    )
+    application.add_handler(autoscanner_interval_conv)
 
     # Message handlers for main menu
     application.add_handler(MessageHandler(filters.Regex("^🛒 خرید VPN$"), handlers.buy_vpn))
@@ -407,6 +536,18 @@ def main():
         fallbacks=[CommandHandler("cancel", admin_cancel)],
     )
     application.add_handler(admin_delsub_conv)
+
+    admin_userinfo_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_userinfo_start, pattern="^admin_userinfo_start$")],
+        states={
+            ADMIN_USERINFO_ID: [
+                CommandHandler("cancel", admin_cancel),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_userinfo_show)
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", admin_cancel)],
+    )
+    application.add_handler(admin_userinfo_conv)
     
     admin_add_balance_conv_handler = ConversationHandler(
         entry_points=[
@@ -615,15 +756,66 @@ def main():
                 CommandHandler("cancel", admin_cancel),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, admin_manual_sub_config_input)
             ],
+            # NEW: Target selection state for manual subscription (added in section 3)
+            ADMIN_MANUAL_SUB_TARGET: [
+                CommandHandler("cancel", admin_cancel),
+                CallbackQueryHandler(admin_manual_sub_target_selected, pattern="^admin_manual_target_"),
+            ],
         },
         fallbacks=[CommandHandler("cancel", admin_cancel)]
     )
     application.add_handler(admin_manual_sub_conv)
 
+    # Admin Send Plan to User(s) Conversation (gift a real plan, created via the panel
+    # exactly like a normal purchase, either to one user or to every user)
+    admin_send_plan_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(asp.admin_send_plan_start, pattern="^admin_send_plan_start$")],
+        states={
+            asp.ADMSP_TARGET: [
+                CallbackQueryHandler(asp.admin_send_plan_target_single, pattern="^admsp_target_single$"),
+                CallbackQueryHandler(asp.admin_send_plan_target_all, pattern="^admsp_target_all$"),
+            ],
+            asp.ADMSP_USER_ID: [
+                CommandHandler("cancel", admin_cancel),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, asp.admin_send_plan_user_id)
+            ],
+            asp.ADMSP_SCHEME: [
+                CallbackQueryHandler(asp.admin_send_plan_scheme_selected, pattern="^admsp_scheme_"),
+                CallbackQueryHandler(asp.admin_send_plan_cancel, pattern="^admsp_cancel$"),
+            ],
+            asp.ADMSP_PLAN: [
+                CallbackQueryHandler(asp.admin_send_plan_plan_selected, pattern="^admsp_plan_"),
+                CallbackQueryHandler(asp.admin_send_plan_cancel, pattern="^admsp_cancel$"),
+            ],
+            asp.ADMSP_REPLACE: [
+                CallbackQueryHandler(asp.admin_send_plan_replace_selected, pattern="^admsp_replace_"),
+                CallbackQueryHandler(asp.admin_send_plan_cancel, pattern="^admsp_cancel$"),
+            ],
+            asp.ADMSP_DELAY: [
+                CallbackQueryHandler(asp.admin_send_plan_delay_selected, pattern="^admsp_delay_"),
+                CallbackQueryHandler(asp.admin_send_plan_cancel, pattern="^admsp_cancel$"),
+            ],
+            asp.ADMSP_CONFIRM: [
+                CallbackQueryHandler(asp.admin_send_plan_confirm, pattern="^admsp_confirm_yes$"),
+                CallbackQueryHandler(asp.admin_send_plan_cancel, pattern="^admsp_cancel$"),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", admin_cancel)]
+    )
+    application.add_handler(admin_send_plan_conv)
+
     # Admin Add Config to Existing Subscription Conversation
     admin_addconfig_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(admin_addconfig_start, pattern="^admin_addconfig_start$")],
         states={
+            ADMIN_ADDCONFIG_TARGET: [
+                CommandHandler("cancel", admin_cancel),
+                CallbackQueryHandler(admin_addconfig_target_selected, pattern="^admin_addconfig_target_")
+            ],
+            ADMIN_ADDCONFIG_PLAN_SELECT: [
+                CommandHandler("cancel", admin_cancel),
+                CallbackQueryHandler(admin_addconfig_plan_selected, pattern="^admin_addconfig_planidx_")
+            ],
             ADMIN_ADDCONFIG_USER_ID: [
                 CommandHandler("cancel", admin_cancel),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, admin_addconfig_user_id)
@@ -644,6 +836,48 @@ def main():
         fallbacks=[CommandHandler("cancel", admin_cancel)]
     )
     application.add_handler(admin_addconfig_conv)
+
+    # Admin Dynamic Purchase Plans Management (admin_dynamic_plans.py)
+    application.add_handler(CallbackQueryHandler(adp.admin_plans_menu, pattern="^admin_dynamic_plans_menu$"))
+    application.add_handler(CallbackQueryHandler(adp.admin_plan_view, pattern="^dynplan_view_"))
+    application.add_handler(CallbackQueryHandler(adp.admin_plan_toggle, pattern="^dynplan_toggle_"))
+    application.add_handler(CallbackQueryHandler(adp.admin_plan_delete, pattern="^dynplan_delete_"))
+
+    admin_dynplan_add_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(adp.admin_plan_add_start, pattern="^dynplan_add_start$")],
+        states={
+            adp.ADMIN_DYNPLAN_CATEGORY: [
+                CallbackQueryHandler(adp.admin_plan_add_category, pattern="^dynplan_scheme_"),   # <-- باید scheme_ باشه نه cat_
+            ],
+            adp.ADMIN_DYNPLAN_NAME: [
+                CommandHandler("cancel", adp.admin_plan_add_cancel),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, adp.admin_plan_add_name)
+            ],
+            adp.ADMIN_DYNPLAN_DESC: [
+                CommandHandler("cancel", adp.admin_plan_add_cancel),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, adp.admin_plan_add_desc)
+            ],
+            adp.ADMIN_DYNPLAN_PRICE: [
+                CommandHandler("cancel", adp.admin_plan_add_cancel),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, adp.admin_plan_add_price)
+            ],
+            adp.ADMIN_DYNPLAN_DAYS: [
+                CommandHandler("cancel", adp.admin_plan_add_cancel),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, adp.admin_plan_add_days)
+            ],
+            adp.ADMIN_DYNPLAN_VOLUME: [
+                CommandHandler("cancel", adp.admin_plan_add_cancel),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, adp.admin_plan_add_volume)
+            ],
+            adp.ADMIN_DYNPLAN_DAILY: [
+                CommandHandler("cancel", adp.admin_plan_add_cancel),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, adp.admin_plan_add_daily)
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", adp.admin_plan_add_cancel)]
+    )
+    application.add_handler(admin_dynplan_add_conv)
+
     application.add_handler(CallbackQueryHandler(admin_emergency_plan_settings_menu, pattern="^admin_emergency_plan_settings$"))
 
     admin_emergency_volume_conv = ConversationHandler(
@@ -658,6 +892,32 @@ def main():
     )
     application.add_handler(admin_emergency_volume_conv)
 
+    # Admin Edit Existing Subscription Conversation
+    admin_editsub_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_editsub_start, pattern="^admin_editsub_start$")],
+        states={
+            ADMIN_EDITSUB_USER_ID: [
+                CommandHandler("cancel", admin_cancel),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_editsub_user_id)
+            ],
+            ADMIN_EDITSUB_SELECT: [
+                CallbackQueryHandler(admin_editsub_field_selected, pattern="^admin_editsub_field_"),
+                CallbackQueryHandler(admin_editsub_select, pattern="^admin_editsub_pick_"),
+                CallbackQueryHandler(admin_editsub_select, pattern="^admin_editsub_cancel$"),
+            ],
+            ADMIN_EDITSUB_DURATION_INPUT: [
+                CommandHandler("cancel", admin_cancel),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_editsub_duration_input)
+            ],
+            ADMIN_EDITSUB_VOLUME_INPUT: [
+                CommandHandler("cancel", admin_cancel),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_editsub_volume_input)
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", admin_cancel)]
+    )
+    application.add_handler(admin_editsub_conv)
+    
     admin_emergency_duration_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(admin_emergency_edit_duration_start, pattern="^admin_emergency_edit_duration$")],
         states={
@@ -710,12 +970,14 @@ def main():
     application.add_handler(CallbackQueryHandler(handlers.back_to_custom_charge, pattern="^back_to_custom_charge$"))
     application.add_handler(CallbackQueryHandler(handlers.back_to_plan_type, pattern="^back_to_plan_type$"))
     application.add_handler(CallbackQueryHandler(handlers.select_sub_for_volume, pattern="^select_sub_for_volume_"))
-    application.add_handler(CallbackQueryHandler(handlers.plan_selected, pattern="^plan_"))
+    application.add_handler(CallbackQueryHandler(handlers.plan_dyn_selected, pattern="^plan_dyn_"))   # <-- اضافه شد (۳.۴)
+    application.add_handler(CallbackQueryHandler(handlers.back_to_dyn_category, pattern="^back_to_dyn_category$"))
     application.add_handler(CallbackQueryHandler(handlers.protocol_selected, pattern="^protocol_"))
     application.add_handler(CallbackQueryHandler(handlers.pay_with_wallet, pattern="^pay_wallet$"))
     application.add_handler(CallbackQueryHandler(handlers.back_to_main, pattern="^back_to_main$"))
     application.add_handler(CallbackQueryHandler(handlers.back_to_protocols, pattern="^back_to_protocols$"))
     application.add_handler(CallbackQueryHandler(handlers.back_to_plans, pattern="^back_to_plans$"))
+    application.add_handler(CallbackQueryHandler(handlers.back_to_old_plan, pattern="^back_to_old_plan$"))
     application.add_handler(CallbackQueryHandler(handlers.back_to_help, pattern="^back_to_help$"))
     application.add_handler(CallbackQueryHandler(handlers.help_protocol_selected, pattern="^help_"))
     application.add_handler(CallbackQueryHandler(handlers.v2ray_os_selected, pattern="^v2ray_"))
@@ -735,6 +997,25 @@ def main():
     application.add_handler(CallbackQueryHandler(admin_emergency_users_menu, pattern="^admin_emergency_users_menu$"))
     application.add_handler(CallbackQueryHandler(admin_emergency_manage_user, pattern="^admin_emergency_manage_"))
     application.add_handler(CallbackQueryHandler(admin_emergency_revoke, pattern="^admin_emergency_revoke_"))
+
+    application.add_handler(CallbackQueryHandler(adp.admin_schemes_menu, pattern="^dynscheme_menu$"))
+    application.add_handler(CallbackQueryHandler(adp.admin_scheme_view, pattern="^dynscheme_view_"))
+    application.add_handler(CallbackQueryHandler(adp.admin_scheme_toggle, pattern="^dynscheme_toggle_"))
+    application.add_handler(CallbackQueryHandler(adp.admin_scheme_delete, pattern="^dynscheme_delete_"))
+
+    dynscheme_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(adp.admin_scheme_add_start, pattern="^dynscheme_add_start$"),
+            CallbackQueryHandler(adp.admin_scheme_rename_start, pattern="^dynscheme_rename_"),
+            CallbackQueryHandler(adp.admin_scheme_editfooter_start, pattern="^dynscheme_editfooter_"),
+        ],
+        states={
+            adp.ADMIN_DYNSCHEME_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, adp.admin_scheme_name_received)],
+            adp.ADMIN_DYNSCHEME_FOOTER: [MessageHandler(filters.TEXT & ~filters.COMMAND, adp.admin_scheme_footer_received)],
+        },
+        fallbacks=[CommandHandler('cancel', adp.admin_scheme_name_cancel)],
+    )
+    application.add_handler(dynscheme_conv)
 
     admin_emergency_add_user_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(admin_emergency_add_user_start, pattern="^admin_emergency_add_user$")],
@@ -789,7 +1070,12 @@ def main():
         time=dt_time(hour=0, minute=5, tzinfo=ZoneInfo("Asia/Tehran")),
         name="daily_traffic_reset"
     )
-
+    application.job_queue.run_repeating(
+        aas.autoscanner_scheduled_job,
+        interval=1800,
+        first=60,
+        name="autoscanner_periodic_check"
+    )
     async def admin_lifeline_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not is_admin(update.effective_user.id):
             return
