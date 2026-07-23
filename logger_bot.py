@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# logger_bot.py - ارسال لاگ‌های کاربران به گروه تلگرام
+# logger_bot.py - send user/admin activity logs to a Telegram log group
 import json
 import logging
 import asyncio
@@ -10,9 +10,9 @@ from typing import Optional, Dict, Any, List
 logger = logging.getLogger(__name__)
 
 # ============ Constants ============
-LOG_GROUP_ID = None  # مثلاً -1001234567890
+LOG_GROUP_ID = None  # e.g. -1001234567890
 
-# فایلی که شناسه‌ی تاپیک‌های ساخته‌شده در آن ذخیره می‌شود
+# File where created topic IDs are persisted
 TOPICS_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "topics_state.json")
 
 
@@ -27,58 +27,57 @@ def init_logger(group_id: int):
 class Topics:
     """
     Topic IDs for different log categories.
-    توجه: از 2 شروع می‌شود چون thread_id = 1 همیشه متعلق به تاپیک پیش‌فرض
-    "General" هر گروه فروم است و تلگرام هرگز آن را به تاپیک جدید اختصاص نمی‌دهد.
+    Note: starts at 2 because thread_id = 1 always belongs to the default
+    "General" topic of any forum group, and Telegram never assigns it to a new topic.
     """
-    USER_JOIN = 2  # عضویت کاربر جدید
-    USER_REFERRAL = 3  # عضویت با لینک دعوت
-    INVOICE = 4  # فاکتور صادر شده
-    PURCHASE = 5  # مشخصات خرید کاربر
-    SUBSCRIPTION = 6  # اشتراک جدید
-    PANEL_ERROR = 7  # خطاهای پنل
-    ADMIN_ACTION = 8  # اقدامات ادمین
-    SYSTEM_ERROR = 9  # خطاهای سیستمی
-    USER_ACTIVITY = 10  # فعالیت‌های کاربر
-    BALANCE_CHANGE = 11  # تغییرات موجودی
-    REFERRAL_BONUS = 12  # پاداش دعوت
-    VOLUME_ADDED = 13  # افزایش حجم اضافی
-    CARD_PAYMENT = 14  # پرداخت کارت به کارت
-    WALLET_PAYMENT = 15  # پرداخت با کیف پول
-    PANEL_STATUS = 16  # وضعیت پنل‌ها
-    SUBSCRIPTION_EXPIRE = 17  # انقضای اشتراک
-    GIFT_SENT = 18  # ارسال هدیه بین کاربران
+    USER_JOIN = 2  # New user joins
+    USER_REFERRAL = 3  # Joined via referral link
+    INVOICE = 4  # Invoice issued
+    PURCHASE = 5  # User purchase details
+    SUBSCRIPTION = 6  # New subscription
+    PANEL_ERROR = 7  # Panel errors
+    ADMIN_ACTION = 8  # Admin actions
+    SYSTEM_ERROR = 9  # System errors
+    USER_ACTIVITY = 10  # User activity
+    BALANCE_CHANGE = 11  # Balance changes
+    REFERRAL_BONUS = 12  # Referral bonus
+    VOLUME_ADDED = 13  # Extra volume added
+    CARD_PAYMENT = 14  # Card-to-card payment
+    WALLET_PAYMENT = 15  # Wallet payment
+    PANEL_STATUS = 16  # Panel status
+    SUBSCRIPTION_EXPIRE = 17  # Subscription expiry
+    GIFT_SENT = 18  # Gift sent between users
     EMERGENCY_PLAN = 19
 
 
 # ============ Topic Names ============
 TOPIC_NAMES = {
-    Topics.USER_JOIN: "📢 عضویت کاربران جدید",
-    Topics.USER_REFERRAL: "🎁 عضویت با لینک دعوت",
-    Topics.INVOICE: "🧾 فاکتورهای صادر شده",
-    Topics.PURCHASE: "🛒 مشخصات خرید کاربران",
-    Topics.SUBSCRIPTION: "🔑 اشتراک‌های جدید",
-    Topics.PANEL_ERROR: "⚠️ خطاهای پنل",
-    Topics.ADMIN_ACTION: "🔧 اقدامات ادمین",
-    Topics.SYSTEM_ERROR: "💥 خطاهای سیستمی",
-    Topics.USER_ACTIVITY: "🔄 فعالیت‌های کاربران",
-    Topics.BALANCE_CHANGE: "💰 تغییرات موجودی",
-    Topics.REFERRAL_BONUS: "🎁 پاداش‌های دعوت",
-    Topics.VOLUME_ADDED: "➕ افزایش حجم اضافی",
-    Topics.CARD_PAYMENT: "🏦 پرداخت کارت به کارت",
-    Topics.WALLET_PAYMENT: "💰 پرداخت با کیف پول",
-    Topics.PANEL_STATUS: "🖥 وضعیت پنل‌ها",
-    Topics.SUBSCRIPTION_EXPIRE: "⏰ انقضای اشتراک",
-    Topics.GIFT_SENT: "🎁 هدیه‌های ارسالی کاربران",
-    Topics.EMERGENCY_PLAN: "🆘 طرح اضطراری",   # <-- جدید
-    
+    Topics.USER_JOIN: "📢 New User Joins",
+    Topics.USER_REFERRAL: "🎁 Joined via Referral Link",
+    Topics.INVOICE: "🧾 Issued Invoices",
+    Topics.PURCHASE: "🛒 User Purchase Details",
+    Topics.SUBSCRIPTION: "🔑 New Subscriptions",
+    Topics.PANEL_ERROR: "⚠️ Panel Errors",
+    Topics.ADMIN_ACTION: "🔧 Admin Actions",
+    Topics.SYSTEM_ERROR: "💥 System Errors",
+    Topics.USER_ACTIVITY: "🔄 User Activity",
+    Topics.BALANCE_CHANGE: "💰 Balance Changes",
+    Topics.REFERRAL_BONUS: "🎁 Referral Bonuses",
+    Topics.VOLUME_ADDED: "➕ Extra Volume Added",
+    Topics.CARD_PAYMENT: "🏦 Card-to-Card Payments",
+    Topics.WALLET_PAYMENT: "💰 Wallet Payments",
+    Topics.PANEL_STATUS: "🖥 Panel Status",
+    Topics.SUBSCRIPTION_EXPIRE: "⏰ Subscription Expiry",
+    Topics.GIFT_SENT: "🎁 Gifts Sent by Users",
+    Topics.EMERGENCY_PLAN: "🆘 Emergency Plan",
 }
 
 
 # ============ Persisted Topic State ============
 def _load_topics_state() -> Dict[str, int]:
     """
-    خواندن نگاشت topic_id (منطقی، همان Topics.*) -> message_thread_id واقعی تلگرام
-    از فایل. کلیدها به‌صورت رشته ذخیره می‌شوند چون JSON کلید int ندارد.
+    Read the mapping of logical topic_id (Topics.*) -> real Telegram message_thread_id
+    from file. Keys are stored as strings since JSON has no int keys.
     """
     if not os.path.exists(TOPICS_STATE_FILE):
         return {}
@@ -98,21 +97,21 @@ def _save_topics_state(state: Dict[str, int]) -> None:
         logger.error(f"Error saving topics state file: {e}")
 
 
-# نگاشت درون‌حافظه‌ای: topic_id منطقی -> message_thread_id واقعی
+# In-memory mapping: logical topic_id -> real message_thread_id
 _TOPIC_THREAD_MAP: Dict[int, int] = {}
 
 
 def get_thread_id(topic_id: int) -> Optional[int]:
-    """گرفتن message_thread_id واقعی تلگرام برای یک topic_id منطقی"""
+    """Get the real Telegram message_thread_id for a logical topic_id"""
     return _TOPIC_THREAD_MAP.get(topic_id)
 
 
 # ============ Create Topics ============
 async def create_all_topics(bot) -> bool:
     """
-    ساخت تمام تاپیک‌ها در گروه لاگ.
-    به‌جای پرسیدن از تلگرام (که چنین APIای ندارد)، وضعیت از فایل محلی خوانده می‌شود
-    و فقط تاپیک‌هایی که واقعاً ساخته نشده‌اند، ساخته می‌شوند.
+    Create all topics in the log group.
+    Instead of asking Telegram (which has no such API), state is read from a local
+    file and only topics that don't actually exist yet are created.
     """
     global _TOPIC_THREAD_MAP
 
@@ -122,20 +121,20 @@ async def create_all_topics(bot) -> bool:
 
     try:
         state = _load_topics_state()
-        # کلیدها رشته هستند؛ به int تبدیل می‌کنیم
+        # Keys are strings; convert to int
         _TOPIC_THREAD_MAP = {int(k): v for k, v in state.items()}
 
         created_count = 0
 
         for topic_id, topic_name in TOPIC_NAMES.items():
-            # اگر قبلاً ساخته و ذخیره شده، رد شو
+            # Skip if already created and saved
             if topic_id in _TOPIC_THREAD_MAP:
                 logger.info(
                     f"Topic {topic_id} already exists (thread_id={_TOPIC_THREAD_MAP[topic_id]}): {topic_name}"
                 )
                 continue
 
-            # ساخت تاپیک جدید
+            # Create a new topic
             try:
                 result = await bot.create_forum_topic(
                     chat_id=LOG_GROUP_ID,
@@ -147,7 +146,7 @@ async def create_all_topics(bot) -> bool:
                 created_count += 1
                 logger.info(f"✅ Created topic {topic_id}: {topic_name} (thread_id={thread_id})")
 
-                # بلافاصله ذخیره کن تا اگر بعداً خطا رخ داد، این یکی از دست نرود
+                # Save immediately so this one isn't lost if a later error occurs
                 _save_topics_state({str(k): v for k, v in _TOPIC_THREAD_MAP.items()})
 
                 await asyncio.sleep(0.5)  # Rate limit
@@ -175,7 +174,7 @@ async def send_log_message(topic_id: int, message: str, parse_mode: str = 'HTML'
         logger.warning("Bot instance not provided")
         return None
 
-    # topic_id منطقی را به message_thread_id واقعی تلگرام تبدیل کن
+    # Convert logical topic_id to real Telegram message_thread_id
     thread_id = get_thread_id(topic_id)
     if thread_id is None:
         logger.warning(f"No thread_id found for logical topic {topic_id}; sending without topic")
@@ -206,42 +205,42 @@ async def send_log_message(topic_id: int, message: str, parse_mode: str = 'HTML'
 
 # ============ Format Helpers ============
 def format_user_info(user) -> str:
-    """Format user information for display (از آبجکت user تلگرام)"""
-    first_name = user.first_name or 'نامشخص'
+    """Format user information for display (from a Telegram user object)"""
+    first_name = user.first_name or 'Unknown'
     last_name = user.last_name or ''
-    username = f"@{user.username}" if user.username else 'ندارد'
+    username = f"@{user.username}" if user.username else 'None'
 
     return f"""
-👤 **اطلاعات کاربر:**
-🆔 شناسه: `{user.id}`
-📛 نام: {first_name} {last_name}
-🔰 یوزرنیم: {username}
+👤 **User Info:**
+🆔 ID: `{user.id}`
+📛 Name: {first_name} {last_name}
+🔰 Username: {username}
     """.strip()
 
 
 def format_plan_info(plan: Dict) -> str:
     """Format plan information"""
-    name = plan.get('name', 'نامشخص')
+    name = plan.get('name', 'Unknown')
     price = plan.get('price', 0)
     days = plan.get('days', 0)
     volume = plan.get('daily_volume', '')
 
     result = f"""
-📦 **پلن انتخابی:**
-📛 نام: {name}
-💰 قیمت: {price:,} تومان
-⏰ مدت: {days} روز
+📦 **Selected Plan:**
+📛 Name: {name}
+💰 Price: {price:,} Toman
+⏰ Duration: {days} days
 """
     if volume:
-        result += f"📊 حجم روزانه: {volume} گیگ\n"
+        result += f"📊 Daily volume: {volume} GB\n"
 
     return result.strip()
 
 
 def format_user_short(user_id: int, username: str = None) -> str:
     """
-    (Deprecated) Format short user info - فقط برای سازگاری با کدهای قدیمی نگه داشته شده.
-    برای نمایش کامل کاربر از format_user_full استفاده کنید.
+    (Deprecated) Format short user info - kept only for compatibility with old code.
+    Use format_user_full for the complete user display.
     """
     if username:
         return f"@{username} (`{user_id}`)"
@@ -249,51 +248,53 @@ def format_user_short(user_id: int, username: str = None) -> str:
 
 
 def _full_name(first_name: str = None, last_name: str = None) -> str:
-    """ترکیب نام و نام خانوادگی؛ اگر هیچ‌کدام نبود 'نامشخص' برمی‌گرداند"""
+    """Combine first and last name; returns 'Unknown' if neither is present"""
     first_name = (first_name or '').strip()
     last_name = (last_name or '').strip()
     full = f"{first_name} {last_name}".strip()
-    return full if full else 'نامشخص'
+    return full if full else 'Unknown'
 
 
 def format_user_full(user_id: int, username: str = None,
                       first_name: str = None, last_name: str = None) -> str:
     """
-    فرمت کامل اطلاعات کاربر شامل نام، نام خانوادگی، یوزرنیم و آیدی عددی.
-    در تمام لاگ‌ها به‌جای format_user_short از این تابع استفاده می‌شود.
+    Multi-line format of full user info: name, last name, username, and numeric ID.
+    Used everywhere instead of format_user_short.
     """
     name = _full_name(first_name, last_name)
-    username_text = f"@{username}" if username else 'ندارد'
+    username_text = f"@{username}" if username else 'None'
 
     return (
-        f"📛 نام: {name} | "
-        f"🔰 یوزرنیم: {username_text} | "
-        f"🆔 آیدی: `{user_id}`"
+        f"📛 Name: {name}\n"
+        f"🔰 Username: {username_text}\n"
+        f"🆔 ID: `{user_id}`"
     )
+
 
 def format_user_multiline(user_id: int, username: str = None,
                            first_name: str = None, last_name: str = None,
                            show_name: bool = True) -> str:
     """
-    فرمت چندخطی اطلاعات کاربر (نام اختیاری، یوزرنیم و آیدی جدا از هم).
-    مناسب برای مواردی که می‌خواهیم یوزرنیم و آیدی در خطوط جداگانه نمایش داده شوند.
+    Multi-line user info format (name optional, username and ID on separate lines).
+    Useful when we want username and ID shown on their own lines.
     """
     name = _full_name(first_name, last_name)
     username_clean = (username or '').lstrip('@').strip()
-    username_text = username_clean if username_clean else 'ندارد'
+    username_text = username_clean if username_clean else 'None'
 
     lines = []
     if show_name:
-        lines.append(f"📛 نام: {name}")
-    lines.append(f"🔰 یوزرنیم: {username_text}")
-    lines.append(f"🆔 آیدی: `{user_id}`")
+        lines.append(f"📛 Name: {name}")
+    lines.append(f"🔰 Username: {username_text}")
+    lines.append(f"🆔 ID: `{user_id}`")
     return "\n".join(lines)
+
 
 def _resolve_user_details(user_id: int, username: str = None,
                            first_name: str = None, last_name: str = None) -> Dict[str, Any]:
     """
-    اگر نام/یوزرنیم به تابع پاس داده نشده باشد، تلاش می‌کند اطلاعات را از دیتابیس بخواند
-    تا در هیچ لاگی فقط آیدی عددی به تنهایی نمایش داده نشود.
+    If name/username weren't passed to the function, try to read them from the
+    database, so no log ever shows just a bare numeric ID.
     """
     if username or first_name or last_name:
         return {
@@ -351,7 +352,7 @@ async def log_user_join(bot, user_id: int, username: str, first_name: str, refer
             show_name=False
         )
 
-        # ============ آمار دعوت‌کننده ============
+        # ============ Inviter stats ============
         referrals_count = 0
         total_commission = 0
         try:
@@ -362,23 +363,23 @@ async def log_user_join(bot, user_id: int, username: str, first_name: str, refer
             pass
 
         referral_block = (
-            f"🎁 دعوت شده توسط:\n{inviter_block}\n"
-            f"📊 آمار:\n"
-            f"👥 تعداد کل دعوت‌های موفق: {referrals_count}\n"
-            f"💰 مجموع کمیسیون دریافتی: {total_commission:,} تومان\n"
+            f"🎁 Referred by:\n{inviter_block}\n"
+            f"📊 Stats:\n"
+            f"👥 Total successful referrals: {referrals_count}\n"
+            f"💰 Total commission earned: {total_commission:,} Toman\n"
         )
     else:
-        referral_block = "✅ بدون دعوت\n"
+        referral_block = "✅ No referral\n"
 
     message = f"""
-📢 **عضویت جدید کاربر**
-🕐 زمان: {timestamp}
+📢 **New User Joined**
+🕐 Time: {timestamp}
 {user_block}
-💰 موجودی اولیه: {balance:,} تومان
-{referral_block}📊 **وضعیت:** کاربر جدید به ربات پیوست
+💰 Initial balance: {balance:,} Toman
+{referral_block}📊 **Status:** New user joined the bot
     """.strip()
 
-    # انتخاب تاپیک مناسب
+    # Pick the appropriate topic
     topic = Topics.USER_REFERRAL if referred_by else Topics.USER_JOIN
     await send_log_message(topic, message, bot=bot)
 
@@ -391,13 +392,13 @@ async def log_invoice_issued(bot, user_id: int, plan_name: str, price: int, card
     user_info = format_user_full(**details)
 
     message = f"""
-🧾 **فاکتور صادر شد**
-🕐 زمان: {timestamp}
+🧾 **Invoice Issued**
+🕐 Time: {timestamp}
 {user_info}
-📦 پلن: {plan_name}
-💰 مبلغ: {price:,} تومان
-{'🔢 چهار رقم آخر کارت: `' + card_digits + '`' if card_digits else ''}
-📊 **وضعیت:** ⏳ منتظر پرداخت
+📦 Plan: {plan_name}
+💰 Amount: {price:,} Toman
+{'🔢 Last 4 card digits: `' + card_digits + '`' if card_digits else ''}
+📊 **Status:** ⏳ Awaiting payment
     """.strip()
 
     await send_log_message(Topics.INVOICE, message, bot=bot)
@@ -411,22 +412,22 @@ async def log_purchase_details(bot, user_id: int, plan: Dict, payment_method: st
 
     details = _resolve_user_details(user_id, username, first_name, last_name)
     user_info = format_user_full(**details)
-    status_text = "✅ موفق" if status == 'success' else "❌ ناموفق"
+    status_text = "✅ Success" if status == 'success' else "❌ Failed"
     status_emoji = "✅" if status == 'success' else "❌"
 
     message = f"""
-🛒 **جزئیات خرید** {status_emoji}
-🕐 زمان: {timestamp}
+🛒 **Purchase Details** {status_emoji}
+🕐 Time: {timestamp}
 {user_info}
-{'📧 ایمیل اشتراک: `' + email + '`' if email else ''}
-📦 **پلن:**
-📛 نام: {plan.get('name', 'نامشخص')}
-💰 قیمت: {amount:,} تومان
-⏰ مدت: {plan.get('days', 0)} روز
-{'📊 حجم: ' + str(plan.get('daily_volume', '')) + ' گیگ روزانه' if plan.get('daily_volume') else ''}
-💳 **روش پرداخت:** {payment_method}
-💳 موجودی جدید: {balance_after:,} تومان
-📊 **وضعیت:** {status_text}
+{'📧 Subscription email: `' + email + '`' if email else ''}
+📦 **Plan:**
+📛 Name: {plan.get('name', 'Unknown')}
+💰 Price: {amount:,} Toman
+⏰ Duration: {plan.get('days', 0)} days
+{'📊 Volume: ' + str(plan.get('daily_volume', '')) + ' GB/day' if plan.get('daily_volume') else ''}
+💳 **Payment method:** {payment_method}
+💳 New balance: {balance_after:,} Toman
+📊 **Status:** {status_text}
     """.strip()
 
     await send_log_message(Topics.PURCHASE, message, bot=bot)
@@ -439,22 +440,22 @@ async def log_payment_card(bot, user_id: int, plan_name: str, amount: int,
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     status_text = {
-        'pending': '⏳ در انتظار تایید',
-        'success': '✅ تایید شد',
-        'failed': '❌ ناموفق'
+        'pending': '⏳ Awaiting approval',
+        'success': '✅ Approved',
+        'failed': '❌ Failed'
     }.get(status, status)
 
     details = _resolve_user_details(user_id, username, first_name, last_name)
     user_info = format_user_full(**details)
 
     message = f"""
-🏦 **پرداخت کارت به کارت**
-🕐 زمان: {timestamp}
+🏦 **Card-to-Card Payment**
+🕐 Time: {timestamp}
 {user_info}
-📦 پلن: {plan_name}
-💰 مبلغ: {amount:,} تومان
-🔢 چهار رقم آخر کارت: `{card_digits}`
-📊 **وضعیت:** {status_text}
+📦 Plan: {plan_name}
+💰 Amount: {amount:,} Toman
+🔢 Last 4 card digits: `{card_digits}`
+📊 **Status:** {status_text}
     """.strip()
 
     await send_log_message(Topics.CARD_PAYMENT, message, bot=bot)
@@ -466,19 +467,19 @@ async def log_wallet_payment(bot, user_id: int, plan_name: str, amount: int,
     """Log wallet payment"""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    status_text = "✅ موفق" if status == 'success' else "❌ ناموفق"
+    status_text = "✅ Success" if status == 'success' else "❌ Failed"
     details = _resolve_user_details(user_id, username, first_name, last_name)
     user_info = format_user_full(**details)
 
     message = f"""
-💰 **پرداخت با کیف پول**
-🕐 زمان: {timestamp}
+💰 **Wallet Payment**
+🕐 Time: {timestamp}
 {user_info}
-📦 پلن: {plan_name}
-💰 مبلغ پرداخت: {amount:,} تومان
-💳 موجودی قبل: {balance_before:,} تومان
-💳 موجودی بعد: {balance_after:,} تومان
-📊 **وضعیت:** {status_text}
+📦 Plan: {plan_name}
+💰 Amount paid: {amount:,} Toman
+💳 Balance before: {balance_before:,} Toman
+💳 Balance after: {balance_after:,} Toman
+📊 **Status:** {status_text}
     """.strip()
 
     await send_log_message(Topics.WALLET_PAYMENT, message, bot=bot)
@@ -494,14 +495,14 @@ async def log_subscription_created(bot, user_id: int, subscription_id: int,
     user_info = format_user_full(**details)
 
     message = f"""
-🔑 **اشتراک جدید ایجاد شد**
-🕐 زمان: {timestamp}
+🔑 **New Subscription Created**
+🕐 Time: {timestamp}
 {user_info}
-🆔 اشتراک: `{subscription_id}`
-📦 پلن: {plan_name}
-📧 ایمیل: `{email}`
-🖥 پنل: {panel_id}
-📊 **وضعیت:** ✅ فعال
+🆔 Subscription: `{subscription_id}`
+📦 Plan: {plan_name}
+📧 Email: `{email}`
+🖥 Panel: {panel_id}
+📊 **Status:** ✅ Active
     """.strip()
 
     await send_log_message(Topics.SUBSCRIPTION, message, bot=bot)
@@ -516,15 +517,15 @@ async def log_panel_error(bot, user_id: int, action: str, error: str, plan_name:
         details = _resolve_user_details(user_id, username, first_name, last_name)
         user_info = format_user_full(**details)
     else:
-        user_info = "👤 کاربر: سیستم"
+        user_info = "👤 User: System"
 
     message = f"""
-⚠️ **خطای پنل**
-🕐 زمان: {timestamp}
+⚠️ **Panel Error**
+🕐 Time: {timestamp}
 {user_info}
-{'📦 پلن: ' + plan_name if plan_name else ''}
-🔧 عملیات: {action}
-❌ **خطا:**
+{'📦 Plan: ' + plan_name if plan_name else ''}
+🔧 Action: {action}
+❌ **Error:**
 <code>{error[:500]}</code>
     """.strip()
 
@@ -542,21 +543,27 @@ async def log_admin_action(bot, admin_id: int, action: str, target_user_id: int 
     admin_details = _resolve_user_details(admin_id, username, first_name, last_name)
     admin_info = format_user_full(**admin_details)
 
+    lines = [
+        "🔧 **Admin Action**",
+        f"🕐 Time: {timestamp}",
+        "👤 Admin ->",
+        admin_info,
+    ]
+
     if target_user_id:
         target_details = _resolve_user_details(target_user_id, target_username, target_first_name, target_last_name)
         target_info = format_user_full(**target_details)
-    else:
-        target_info = "👤 کاربر هدف: نامشخص"
+        lines.append("👤 Target user ->")
+        lines.append(target_info)
 
-    message = f"""
-🔧 **اقدام ادمین**
-🕐 زمان: {timestamp}
-👤 ادمین -> {admin_info}
-{'👤 کاربر هدف -> ' + target_info if target_user_id else ''}
-{'💰 مبلغ: ' + f'{amount:,} تومان' if amount else ''}
-📝 توضیحات: {details or 'بدون توضیحات'}
-📊 **اقدام:** {action}
-    """.strip()
+    if amount:
+        lines.append(f"💰 Amount: {amount:,} Toman")
+
+    lines.append("📝 Details:")
+    lines.append(details or 'No details')
+    lines.append(f"📊 **Action:** {action}")
+
+    message = "\n".join(lines)
 
     await send_log_message(Topics.ADMIN_ACTION, message, bot=bot)
 
@@ -566,10 +573,10 @@ async def log_system_error(bot, error: str, context: str = None):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     message = f"""
-💥 **خطای سیستمی**
-🕐 زمان: {timestamp}
-{'📝 متن: ' + context if context else ''}
-❌ **خطا:**
+💥 **System Error**
+🕐 Time: {timestamp}
+{'📝 Context: ' + context if context else ''}
+❌ **Error:**
 <code>{error[:500]}</code>
     """.strip()
 
@@ -585,11 +592,11 @@ async def log_user_activity(bot, user_id: int, action: str, details: str = None,
     user_info = format_user_full(**user_details)
 
     message = f"""
-🔄 **فعالیت کاربر**
-🕐 زمان: {timestamp}
+🔄 **User Activity**
+🕐 Time: {timestamp}
 {user_info}
-📝 فعالیت: {action}
-{'📋 جزئیات: ' + details if details else ''}
+📝 Activity: {action}
+{'📋 Details: ' + details if details else ''}
     """.strip()
 
     await send_log_message(Topics.USER_ACTIVITY, message, bot=bot)
@@ -600,19 +607,19 @@ async def log_balance_change(bot, user_id: int, change: int, new_balance: int, r
     """Log balance changes"""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    change_type = "افزایش" if change > 0 else "کاهش"
+    change_type = "Increase" if change > 0 else "Decrease"
     emoji = "📈" if change > 0 else "📉"
     details = _resolve_user_details(user_id, username, first_name, last_name)
     user_info = format_user_full(**details)
 
     message = f"""
-{emoji} **تغییر موجودی**
-🕐 زمان: {timestamp}
+{emoji} **Balance Change**
+🕐 Time: {timestamp}
 {user_info}
-📊 نوع: {change_type}
-💰 مبلغ: {abs(change):,} تومان
-💳 موجودی جدید: {new_balance:,} تومان
-📝 دلیل: {reason}
+📊 Type: {change_type}
+💰 Amount: {abs(change):,} Toman
+💳 New balance: {new_balance:,} Toman
+📝 Reason: {reason}
     """.strip()
 
     await send_log_message(Topics.BALANCE_CHANGE, message, bot=bot)
@@ -631,12 +638,12 @@ async def log_referral_bonus(bot, user_id: int, amount: int, new_user_id: int,
     new_user_info = format_user_full(**new_user_details)
 
     message = f"""
-🎁 **پاداش دعوت**
-🕐 زمان: {timestamp}
-👤 کاربر دعوت‌کننده -> {inviter_info}
-👤 کاربر جدید -> {new_user_info}
-💰 مبلغ پاداش: {amount:,} تومان
-📊 **وضعیت:** ✅ پرداخت شد
+🎁 **Referral Bonus**
+🕐 Time: {timestamp}
+👤 Inviter -> {inviter_info}
+👤 New user -> {new_user_info}
+💰 Bonus amount: {amount:,} Toman
+📊 **Status:** ✅ Paid
     """.strip()
 
     await send_log_message(Topics.REFERRAL_BONUS, message, bot=bot)
@@ -651,14 +658,14 @@ async def log_volume_added(bot, user_id: int, subscription_id: int, volume: int,
     user_info = format_user_full(**details)
 
     message = f"""
-➕ **افزایش حجم اضافی**
-🕐 زمان: {timestamp}
+➕ **Extra Volume Added**
+🕐 Time: {timestamp}
 {user_info}
-🆔 اشتراک: `{subscription_id}`
-📊 حجم اضافه شده: {volume} گیگ
-💰 قیمت: {price:,} تومان
-💳 روش پرداخت: {method}
-📊 **وضعیت:** ✅ موفق
+🆔 Subscription: `{subscription_id}`
+📊 Volume added: {volume} GB
+💰 Price: {price:,} Toman
+💳 Payment method: {method}
+📊 **Status:** ✅ Success
     """.strip()
 
     await send_log_message(Topics.VOLUME_ADDED, message, bot=bot)
@@ -673,12 +680,12 @@ async def log_subscription_expire(bot, user_id: int, subscription_id: int, plan_
     user_info = format_user_full(**details)
 
     message = f"""
-⏰ **انقضای اشتراک**
-🕐 زمان: {timestamp}
+⏰ **Subscription Expired**
+🕐 Time: {timestamp}
 {user_info}
-🆔 اشتراک: `{subscription_id}`
-📦 پلن: {plan_name}
-📊 **وضعیت:** ⏰ منقضی شد
+🆔 Subscription: `{subscription_id}`
+📦 Plan: {plan_name}
+📊 **Status:** ⏰ Expired
     """.strip()
 
     await send_log_message(Topics.SUBSCRIPTION_EXPIRE, message, bot=bot)
@@ -690,17 +697,17 @@ async def log_panel_status(bot, panel_id: str, status: str, details: str = None)
 
     status_emoji = "✅" if status == "online" else "❌" if status == "offline" else "⚠️"
     status_text = {
-        "online": "آنلاین",
-        "offline": "آفلاین",
-        "error": "خطا"
+        "online": "Online",
+        "offline": "Offline",
+        "error": "Error"
     }.get(status, status)
 
     message = f"""
-🖥 **وضعیت پنل** {status_emoji}
-🕐 زمان: {timestamp}
-🆔 پنل: `{panel_id}`
-📊 وضعیت: {status_text}
-{'📝 جزئیات: ' + details if details else ''}
+🖥 **Panel Status** {status_emoji}
+🕐 Time: {timestamp}
+🆔 Panel: `{panel_id}`
+📊 Status: {status_text}
+{'📝 Details: ' + details if details else ''}
     """.strip()
 
     await send_log_message(Topics.PANEL_STATUS, message, bot=bot)
@@ -717,13 +724,13 @@ async def log_gift_sent(bot, sender_id: int, recipient_id: int, amount: int, gif
     recipient_info = format_user_full(**recipient_details)
 
     message = f"""
-🎁 **هدیه ارسال شد**
-🕐 زمان: {timestamp}
-👤 فرستنده -> {sender_info}
-👤 گیرنده -> {recipient_info}
-💰 مبلغ: {amount:,} تومان
-{'💌 پیام: ' + gift_message if gift_message else ''}
-📊 **وضعیت:** ✅ موفق
+🎁 **Gift Sent**
+🕐 Time: {timestamp}
+👤 Sender -> {sender_info}
+👤 Recipient -> {recipient_info}
+💰 Amount: {amount:,} Toman
+{'💌 Message: ' + gift_message if gift_message else ''}
+📊 **Status:** ✅ Success
     """.strip()
 
     await send_log_message(Topics.GIFT_SENT, message, bot=bot)
@@ -737,17 +744,17 @@ async def log_emergency_config_result(bot, user_id: int, panel_id: str, panel_na
     details = _resolve_user_details(user_id, username, first_name, last_name)
     user_info = format_user_full(**details)
 
-    status_text = "✅ موفق" if status == 'success' else "❌ ناموفق"
+    status_text = "✅ Success" if status == 'success' else "❌ Failed"
     detail_line = ""
     if detail and status != 'success':
-        detail_line = f"\n❌ خطا:\n<code>{detail[:500]}</code>"
+        detail_line = f"\n❌ Error:\n<code>{detail[:500]}</code>"
 
     message = f"""
-🆘 **ساخت کانفیگ طرح اضطراری**
-🕐 زمان: {timestamp}
+🆘 **Emergency Plan Config Creation**
+🕐 Time: {timestamp}
 {user_info}
-🖥 پنل: {panel_name} (`{panel_id}`)
-📊 **وضعیت:** {status_text}{detail_line}
+🖥 Panel: {panel_name} (`{panel_id}`)
+📊 **Status:** {status_text}{detail_line}
     """.strip()
 
     await send_log_message(Topics.EMERGENCY_PLAN, message, parse_mode='HTML', bot=bot)
