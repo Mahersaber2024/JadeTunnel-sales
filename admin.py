@@ -13,7 +13,8 @@ import html as html_lib
 from telegram.ext import ContextTypes, ConversationHandler, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 from panel_manager import get_panel_manager
 from client_manager import PanelClientFactory
-
+import admin_dynamic_plans as adp
+import asyncio
 logger = logging.getLogger(__name__)
 
 # ====================== Constants ======================
@@ -47,8 +48,16 @@ ADMIN_ADDCONFIG_SELECT_SUB = 28
 ADMIN_ADDCONFIG_PRIORITY = 29
 ADMIN_ADDCONFIG_LINK = 30
 ADMIN_MANUAL_SUB_VOLUME = 31
-ADMIN_EMERGENCY_VOLUME_INPUT = 32     # <-- جدید
-ADMIN_EMERGENCY_DURATION_INPUT = 33   # <-- جدید
+ADMIN_EMERGENCY_VOLUME_INPUT = 32    
+ADMIN_EMERGENCY_DURATION_INPUT = 33  
+ADMIN_EDITSUB_USER_ID = 34
+ADMIN_EDITSUB_SELECT = 35
+ADMIN_EDITSUB_DURATION_INPUT = 36
+ADMIN_EDITSUB_VOLUME_INPUT = 37
+ADMIN_USERINFO_ID = 38
+ADMIN_MANUAL_SUB_TARGET = 39
+ADMIN_ADDCONFIG_TARGET = 40
+ADMIN_ADDCONFIG_PLAN_SELECT = 41
 
 MANUAL_PLAN_PRESETS = {
     'balanced': '🟢 متعادل',
@@ -177,6 +186,12 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("🆘 Emergency Management", callback_data="admin_emergency_settings"),
             InlineKeyboardButton("🕯 Lifeline Settings", callback_data="admin_lifeline_settings"),
         ],
+        [
+            InlineKeyboardButton("📋 Purchase Plans Management", callback_data="admin_dynamic_plans_menu"),
+        ],
+        [
+            InlineKeyboardButton("🛰 AutoScanner (IP کلودفلر)", callback_data="admin_autoscanner_menu"),
+        ],     
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
@@ -204,6 +219,12 @@ def _admin_main_menu_keyboard():
             InlineKeyboardButton("🆘 Emergency Management", callback_data="admin_emergency_settings"),
             InlineKeyboardButton("🕯 Lifeline Settings", callback_data="admin_lifeline_settings"),
         ],
+        [
+            InlineKeyboardButton("📋 Purchase Plans Management", callback_data="admin_dynamic_plans_menu"),
+        ],
+        [
+            InlineKeyboardButton("🛰 AutoScanner (IP کلودفلر)", callback_data="admin_autoscanner_menu"),
+        ],     
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -233,8 +254,11 @@ async def admin_user_management_menu(update: Update, context: ContextTypes.DEFAU
         return
 
     keyboard = [
+        [InlineKeyboardButton("🔍 View User Info", callback_data="admin_userinfo_start")],   # <-- جدید
         [InlineKeyboardButton("💰 Add User Balance", callback_data="admin_add_balance")],
         [InlineKeyboardButton("➕ Add Manual Subscription", callback_data="admin_manual_sub_add")],
+        [InlineKeyboardButton("🎁 Send Plan to User(s)", callback_data="admin_send_plan_start")],
+        [InlineKeyboardButton("✏️ Edit User Subscription", callback_data="admin_editsub_start")],
         [InlineKeyboardButton("➕ Add Config to Subscription", callback_data="admin_addconfig_start")],
         [InlineKeyboardButton("🗑 Delete / Reset User Subscription", callback_data="admin_delete_sub")],
         [InlineKeyboardButton("🧨 Delete User", callback_data="admin_delete_user")],
@@ -530,8 +554,111 @@ async def admin_delete_sub_select(update: Update, context: ContextTypes.DEFAULT_
     context.user_data.pop('admin_delsub_list', None)
     return ConversationHandler.END
 
-# ============ Admin Panel Management ============
+# ============ Admin: View Full User Info ============
+async def admin_userinfo_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id):
+        await query.edit_message_text("⛔️ You do not have admin access.")
+        return ConversationHandler.END
 
+    await query.edit_message_text(
+        "🔍 View User Info\n\n"
+        "👤 Please send the target user's numeric ID:\n\n"
+        "⚠️ Send /cancel to abort."
+    )
+    return ADMIN_USERINFO_ID
+
+async def admin_userinfo_show(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    if text == "/cancel":
+        await update.message.reply_text("❌ Operation cancelled.", reply_markup=get_main_menu())
+        return ConversationHandler.END
+
+    if not text.isdigit():
+        await update.message.reply_text(
+            "❌ The ID must be numeric only. Please send it again:\n\n⚠️ Send /cancel to abort."
+        )
+        return ADMIN_USERINFO_ID
+
+    target_user_id = int(text)
+    user = db.get_user(target_user_id)
+
+    if not user:
+        await update.message.reply_text(
+            "❌ No user found with this ID.\n\nPlease send a different ID or /cancel to abort."
+        )
+        return ADMIN_USERINFO_ID
+
+    username_display = f"@{user.get('username')}" if user.get('username') else "-"
+    name = user.get('first_name') or "-"
+    balance_str = f"{user.get('balance', 0):,}"
+
+    active_subs = db.get_active_subscriptions(target_user_id)
+
+    header = (
+        f"👤 User Info\n\n"
+        f"🔰 ID: <code>{target_user_id}</code>\n"
+        f"👤 Name: {html_lib.escape(str(name))}\n"
+        f"🆔 Username: {html_lib.escape(username_display)}\n"
+        f"💰 Balance: {balance_str} Toman\n"
+        f"📊 Active subscriptions: {len(active_subs)}\n"
+    )
+    await update.message.reply_text(header, parse_mode='HTML')
+
+    if not active_subs:
+        await update.message.reply_text("ℹ️ No active subscriptions for this user.", reply_markup=get_main_menu())
+        return ConversationHandler.END
+
+    from handlers import get_single_sub_link
+
+    for i, sub in enumerate(active_subs, 1):
+        vol = sub.get('remaining_volume', 0)
+        vol_text = 'Unlimited' if not vol else f"{vol} GB"
+        end_date = str(sub.get('end_date', ''))[:10]
+
+        panel_name = "-"
+        panel_id = sub.get('panel_id')
+        if panel_id:
+            panel_manager = get_panel_manager()
+            panel_data = panel_manager.get_panel(panel_id)
+            if panel_data:
+                panel_name = panel_data.get('name', panel_id)
+
+        manual_configs = db.get_manual_configs(sub['id']) or []
+        manual_configs_count = len(manual_configs)
+
+        sub_text = (
+            f"📦 Subscription {i}\n\n"
+            f"🆔 Sub ID: {sub['id']}\n"
+            f"📛 Plan: {sub.get('plan_name') or sub.get('plan_type', '-')}\n"
+            f"📧 Email: {sub.get('email', '-')}\n"
+            f"🖥 Panel: {panel_name}\n"
+            f"⏰ Duration: {sub.get('duration_days')} days\n"
+            f"📅 Expires: {end_date}\n"
+            f"📊 Volume: {vol_text}\n"
+            f"🔗 Manual configs: {manual_configs_count}\n"
+        )
+
+        single_link = get_single_sub_link(sub['id'])
+        if single_link:
+            sub_text += f"\n🔗 Subscription link:\n<code>{single_link}</code>"
+
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔧 Get Config", callback_data=f"get_config_{sub['id']}")]
+        ])
+
+        await update.message.reply_text(
+            sub_text,
+            parse_mode='HTML',
+            disable_web_page_preview=True,
+            reply_markup=keyboard
+        )
+
+    await update.message.reply_text("✅ Done.", reply_markup=get_main_menu())
+    return ConversationHandler.END
+
+# ============ Admin Panel Management ============
 async def admin_manage_panels(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin panel management"""
     query = update.callback_query
@@ -693,8 +820,10 @@ async def admin_panel_edit_plans_start(update: Update, context: ContextTypes.DEF
         'new': '🆕 New Plan (Unlimited)',
         'old': '📦 Old Plan (Single User)',
         'custom_charge': '🔥 Custom Charge Plan',
-        'emergency': '🆘 Emergency Plan',   # <-- جدید
+        'emergency': '🆘 Emergency Plan',
+        'custom_plan': '🧩 Dynamic Purchase Plans',
     }
+
     current_display = '\n'.join([f"✅ {plan_names.get(p, p)}" for p in current_plans])
     if not current_plans:
         current_display = '❌ No plan selected'
@@ -718,6 +847,10 @@ async def admin_panel_edit_plans_start(update: Update, context: ContextTypes.DEF
             InlineKeyboardButton(  # <-- جدید
                 f"{'✅' if 'emergency' in current_plans else '⬜'} 🆘 Emergency Plan",
                 callback_data=f"panel_toggle_plan_emergency_{panel_id}"
+            ),
+            InlineKeyboardButton(  # <-- جدید
+                f"{'✅' if 'custom_plan' in current_plans else '⬜'} 🧩 Dynamic Plans",
+                callback_data=f"panel_toggle_plan_customplan_{panel_id}"
             )
         ],
         [InlineKeyboardButton("💾 Save Changes", callback_data=f"panel_save_plans_{panel_id}")],
@@ -757,8 +890,11 @@ async def admin_panel_toggle_plan(update: Update, context: ContextTypes.DEFAULT_
     elif data.startswith("panel_toggle_plan_emergency_"):
         panel_id = data.replace("panel_toggle_plan_emergency_", "")
         plan_type = 'emergency'
+    elif data.startswith("panel_toggle_plan_customplan_"):  # <-- اضافه شد
+        panel_id = data.replace("panel_toggle_plan_customplan_", "")
+        plan_type = 'custom_plan'
     else:
-        await query.answer("❌ فرمت داده نامعتبر!", show_alert=True)
+        await query.answer("❌ Invalid data format!", show_alert=True)
         return
 
     panel_manager = get_panel_manager()
@@ -788,7 +924,9 @@ async def admin_panel_toggle_plan(update: Update, context: ContextTypes.DEFAULT_
         'old': '📦 Old Plan (Single User)',
         'custom_charge': '🔥 Custom Charge Plan',
         'emergency': '🆘 Emergency Plan',
+        'custom_plan': '🧩 Dynamic Purchase Plans',
     }
+
     current_display = '\n'.join([f"✅ {plan_names.get(p, p)}" for p in temp_plans])
     if not temp_plans:
         current_display = '❌ No plan selected'
@@ -812,6 +950,10 @@ async def admin_panel_toggle_plan(update: Update, context: ContextTypes.DEFAULT_
             InlineKeyboardButton(
                 f"{'✅' if 'emergency' in temp_plans else '⬜'} 🆘 Emergency Plan",
                 callback_data=f"panel_toggle_plan_emergency_{panel_id}"
+            ),
+            InlineKeyboardButton(
+                f"{'✅' if 'custom_plan' in temp_plans else '⬜'} 🧩 Dynamic Plans",
+                callback_data=f"panel_toggle_plan_customplan_{panel_id}"
             )
         ],
         [InlineKeyboardButton("💾 Save Changes", callback_data=f"panel_save_plans_{panel_id}")],
@@ -861,7 +1003,8 @@ async def admin_panel_save_plans(update: Update, context: ContextTypes.DEFAULT_T
             'new': '🆕 New Plan (Unlimited)',
             'old': '📦 Old Plan (Single User)',
             'custom_charge': '🔥 Custom Charge Plan',
-            'emergency': '🆘 Emergency Plan',  # <-- جدید
+            'emergency': '🆘 Emergency Plan',
+            'custom_plan': '🧩 Dynamic Purchase Plans',
         }
         saved_display = '\n'.join([f"✅ {plan_names.get(p, p)}" for p in temp_plans])
 
@@ -870,26 +1013,26 @@ async def admin_panel_save_plans(update: Update, context: ContextTypes.DEFAULT_T
             admin = query.from_user
 
             changes = []
-            for plan in ['new', 'old', 'custom_charge', 'emergency']:  # <-- اضافه شد emergency
+            for plan in ['new', 'old', 'custom_charge', 'emergency']:
                 was_in_old = plan in old_plans
                 is_in_new = plan in temp_plans
                 if was_in_old and not is_in_new:
-                    changes.append(f"❌ حذف {plan_names.get(plan, plan)}")
+                    changes.append(f"❌ Removed {plan_names.get(plan, plan)}")
                 elif not was_in_old and is_in_new:
-                    changes.append(f"✅ اضافه {plan_names.get(plan, plan)}")
+                    changes.append(f"✅ Added {plan_names.get(plan, plan)}")
 
-            change_text = "\n".join(changes) if changes else "بدون تغییر"
+            change_text = "\n".join(changes) if changes else "No changes"
 
             await log_admin_action(
                 context.bot,
                 admin_id=admin.id,
-                action="ویرایش طرح‌های پنل",
+                action="Edit panel plans",
                 target_user_id=None,
                 details=f"""
-🖥 پنل: {panel.get('name')} (`{panel_id}`)
-📋 تغییرات:
+🖥 Panel: {panel.get('name')} (`{panel_id}`)
+📋 Changes:
 {change_text}
-📊 وضعیت جدید:
+📊 New status:
 {saved_display}
                 """.strip(),
                 username=admin.username,
@@ -919,7 +1062,6 @@ async def admin_panel_save_plans(update: Update, context: ContextTypes.DEFAULT_T
         return ADMIN_PANEL_EDIT_PLANS
 
 # ============ Admin Panel Edit Limit ============
-
 async def admin_panel_edit_limit_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start editing panel subscription limit"""
     query = update.callback_query
@@ -1006,17 +1148,17 @@ async def admin_panel_edit_limit_input(update: Update, context: ContextTypes.DEF
         try:
             from logger_bot import log_admin_action
             admin = update.effective_user
-            
+
             await log_admin_action(
                 context.bot,
                 admin_id=admin.id,
-                action="تغییر محدودیت اشتراک پنل",
+                action="Change panel subscription limit",
                 target_user_id=None,
                 details=f"""
-🖥 پنل: {panel.get('name')} (`{panel_id}`)
-📊 محدودیت قبلی: {panel.get('max_subscriptions', 100)}
-📊 محدودیت جدید: {new_limit}
-📈 استفاده فعلی: {usage}
+🖥 Panel: {panel.get('name')} (`{panel_id}`)
+📊 Previous limit: {panel.get('max_subscriptions', 100)}
+📊 New limit: {new_limit}
+📈 Current usage: {usage}
                 """.strip(),
                 username=admin.username,
                 first_name=admin.first_name,
@@ -1137,19 +1279,19 @@ async def admin_panel_add_input(update: Update, context: ContextTypes.DEFAULT_TY
         try:
             from logger_bot import log_admin_action
             admin = update.effective_user
-            
+
             await log_admin_action(
                 context.bot,
                 admin_id=admin.id,
-                action="افزودن پنل جدید",
+                action="Add new panel",
                 target_user_id=None,
                 details=f"""
-🖥 نام پنل: {name}
-🌐 آدرس: {panel_base}
-👤 کاربر: {username}
-📊 اینباندها: {inbound_ids}
-📈 محدودیت اشتراک: {max_subscriptions}
-📋 طرح‌های پشتیبانی: new, old, custom_charge
+🖥 Panel name: {name}
+🌐 Address: {panel_base}
+👤 Username: {username}
+📊 Inbounds: {inbound_ids}
+📈 Subscription limit: {max_subscriptions}
+📋 Supported plans: new, old, custom_charge
                 """.strip(),
                 username=admin.username,
                 first_name=admin.first_name,
@@ -1189,18 +1331,17 @@ async def admin_panel_delete(update: Update, context: ContextTypes.DEFAULT_TYPE)
     panel_name = panel.get('name') if panel else panel_id
 
     if panel_manager.remove_panel(panel_id):
-        # ============ لاگ حذف پنل ============
         try:
             from logger_bot import log_admin_action
             admin = query.from_user
-            
+
             await log_admin_action(
                 context.bot,
                 admin_id=admin.id,
-                action="حذف پنل",
+                action="Delete panel",
                 target_user_id=None,
                 details=f"""
-🖥 پنل حذف شده: {panel_name} (`{panel_id}`)
+🖥 Deleted panel: {panel_name} (`{panel_id}`)
                 """.strip(),
                 username=admin.username,
                 first_name=admin.first_name,
@@ -1208,7 +1349,7 @@ async def admin_panel_delete(update: Update, context: ContextTypes.DEFAULT_TYPE)
             )
         except Exception as e:
             logger.error(f"Error logging admin action: {e}")
-        
+
         await query.edit_message_text("✅ Panel deleted successfully.")
     else:
         await query.edit_message_text("❌ Error deleting panel.")
@@ -1255,24 +1396,23 @@ async def admin_channel_settings_menu(update: Update, context: ContextTypes.DEFA
 
 def _lifeline_settings_text_and_keyboard():
     enabled = is_lifeline_enabled()
-    status_text = "✅ روشن" if enabled else "❌ خاموش"
+    status_text = "✅ On" if enabled else "❌ Off"
 
     text = (
-        f"🕯 تنظیمات چراغ جاده تونل\n\n"
-        f"وضعیت فعلی: {status_text}\n\n"
-        f"وقتی روشن باشه، پیام «چراغ جاده تونل» در کانال ساخته/آپدیت می‌شه و "
-        f"با عضویت/خروج/خرید کاربران، روزهای باقی‌مانده تغییر می‌کنه."
+        f"🕯 Tunnel Road Lifeline Settings\n\n"
+        f"Current status: {status_text}\n\n"
+        f"When enabled, a «Tunnel Road Lifeline» message is created/updated in the channel, "
+        f"and remaining days change based on user joins/leaves/purchases."
     )
 
     keyboard = [
         [InlineKeyboardButton(
-            "🔴 خاموش کردن" if enabled else "🟢 روشن کردن",
+            "🔴 Turn Off" if enabled else "🟢 Turn On",
             callback_data="admin_lifeline_toggle"
         )],
         [InlineKeyboardButton("🔙 Back", callback_data="admin_back_to_main_menu")]
     ]
     return text, InlineKeyboardMarkup(keyboard)
-
 
 async def admin_lifeline_settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1285,7 +1425,6 @@ async def admin_lifeline_settings_menu(update: Update, context: ContextTypes.DEF
     text, reply_markup = _lifeline_settings_text_and_keyboard()
     await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=None)
 
-
 async def admin_lifeline_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
 
@@ -1295,7 +1434,7 @@ async def admin_lifeline_toggle(update: Update, context: ContextTypes.DEFAULT_TY
 
     new_value = not is_lifeline_enabled()
     set_lifeline_enabled(new_value)
-    await query.answer("✅ وضعیت بروزرسانی شد.")
+    await query.answer("✅ Status updated.")
 
     try:
         from logger_bot import log_admin_action
@@ -1303,9 +1442,9 @@ async def admin_lifeline_toggle(update: Update, context: ContextTypes.DEFAULT_TY
         await log_admin_action(
             context.bot,
             admin_id=admin.id,
-            action="تغییر وضعیت چراغ جاده تونل",
+            action="Toggle Tunnel Road Lifeline status",
             target_user_id=None,
-            details=f"وضعیت جدید: {'روشن' if new_value else 'خاموش'}",
+            details=f"New status: {'On' if new_value else 'Off'}",
             username=admin.username,
             first_name=admin.first_name,
             last_name=admin.last_name
@@ -1313,7 +1452,6 @@ async def admin_lifeline_toggle(update: Update, context: ContextTypes.DEFAULT_TY
     except Exception as e:
         logger.error(f"Error logging admin action: {e}")
 
-    # اگر همین الان روشن شد، فوراً یک بار پست/آپدیت کن
     if new_value:
         import lifeline
         await lifeline.post_or_update_lifeline(context.bot)
@@ -1340,9 +1478,9 @@ async def admin_channel_toggle(update: Update, context: ContextTypes.DEFAULT_TYP
         await log_admin_action(
             context.bot,
             admin_id=admin.id,
-            action="تغییر وضعیت عضویت اجباری کانال",
+            action="Toggle mandatory channel membership",
             target_user_id=None,
-            details=f"وضعیت جدید: {'فعال' if new_value else 'غیرفعال'}",
+            details=f"New status: {'Enabled' if new_value else 'Disabled'}",
             username=admin.username,
             first_name=admin.first_name,
             last_name=admin.last_name
@@ -1400,9 +1538,9 @@ async def admin_channel_edit_input(update: Update, context: ContextTypes.DEFAULT
         await log_admin_action(
             context.bot,
             admin_id=admin.id,
-            action="تغییر کانال اسپانسر",
+            action="Change sponsor channel",
             target_user_id=None,
-            details=f"کانال قبلی: {old_channel}\nکانال جدید: {new_channel}",
+            details=f"Previous channel: {old_channel}\nNew channel: {new_channel}",
             username=admin.username,
             first_name=admin.first_name,
             last_name=admin.last_name
@@ -1463,9 +1601,9 @@ async def admin_channel_title_edit_input(update: Update, context: ContextTypes.D
         await log_admin_action(
             context.bot,
             admin_id=admin.id,
-            action="تغییر متن نمایشی لینک کانال",
+            action="Change channel link display text",
             target_user_id=None,
-            details=f"متن قبلی: {old_title}\nمتن جدید: {new_title}",
+            details=f"Previous text: {old_title}\nNew text: {new_title}",
             username=admin.username,
             first_name=admin.first_name,
             last_name=admin.last_name
@@ -1607,9 +1745,9 @@ async def admin_support_edit_input(update: Update, context: ContextTypes.DEFAULT
         await log_admin_action(
             context.bot,
             admin_id=admin.id,
-            action="تغییر آدرس پشتیبانی",
+            action="Change support address",
             target_user_id=None,
-            details=f"آدرس قبلی: {old_username}\nآدرس جدید: {new_username}",
+            details=f"Previous address: {old_username}\nNew address: {new_username}",
             username=admin.username,
             first_name=admin.first_name,
             last_name=admin.last_name
@@ -1734,10 +1872,10 @@ async def admin_delete_user_confirm(update: Update, context: ContextTypes.DEFAUL
             await log_admin_action(
                 context.bot,
                 admin_id=admin.id,
-                action="حذف کامل کاربر",
+                action="Completely delete user",
                 target_user_id=target_user_id,
-                details=f"کاربر <code>{target_user_id}</code> به‌طور کامل حذف شد.\n"
-                        f"خطاهای حذف کلاینت پنل: {panel_delete_errors}",
+                details=f"User <code>{target_user_id}</code> was completely deleted.\n"
+                        f"Panel client deletion errors: {panel_delete_errors}",
                 username=admin.username,
                 first_name=admin.first_name,
                 last_name=admin.last_name
@@ -1856,9 +1994,9 @@ async def admin_reset_balance_confirm(update: Update, context: ContextTypes.DEFA
             await log_admin_action(
                 context.bot,
                 admin_id=admin.id,
-                action="ریست کیف پول کاربر",
+                action="Reset user wallet",
                 target_user_id=target_user_id,
-                details=f"موجودی قبلی: {old_balance:,} تومان\nموجودی جدید: 0 تومان",
+                details=f"Previous balance: {old_balance:,} Toman\nNew balance: 0 Toman",
                 username=admin.username,
                 first_name=admin.first_name,
                 last_name=admin.last_name
@@ -2014,9 +2152,9 @@ async def admin_bonus_edit_input(update: Update, context: ContextTypes.DEFAULT_T
         await log_admin_action(
             context.bot,
             admin_id=admin.id,
-            action=f"تغییر {label}",
+            action=f"Change {label}",
             target_user_id=None,
-            details=f"مقدار قبلی: {old_value:,} تومان\nمقدار جدید: {amount:,} تومان",
+            details=f"Previous value: {old_value:,} Toman\nNew value: {amount:,} Toman",
             username=admin.username,
             first_name=admin.first_name,
             last_name=admin.last_name
@@ -2384,12 +2522,12 @@ async def admin_card_info_edit_input(update: Update, context: ContextTypes.DEFAU
         await log_admin_action(
             context.bot,
             admin_id=admin.id,
-            action="تغییر اطلاعات کارت پرداخت",
+            action="Change card payment info",
             target_user_id=None,
             details=(
-                f"شماره کارت قبلی: {old_number}\nشماره کارت جدید: {new_number}\n"
-                f"بنام قبلی: {old_holder}\nبنام جدید: {new_holder}\n"
-                f"بانک قبلی: {old_bank}\nبانک جدید: {new_bank}"
+                f"Previous card number: {old_number}\nNew card number: {new_number}\n"
+                f"Previous holder: {old_holder}\nNew holder: {new_holder}\n"
+                f"Previous bank: {old_bank}\nNew bank: {new_bank}"
             ),
             username=admin.username,
             first_name=admin.first_name,
@@ -2437,25 +2575,23 @@ def _emergency_proxy_text_and_keyboard():
     return text, InlineKeyboardMarkup(keyboard)
 
 # ============ Admin: Emergency Plan Default Volume/Duration ============
-
 def _emergency_plan_defaults_text_and_keyboard():
     from bot_settings import get_emergency_plan_volume_gb, get_emergency_plan_duration_days
     volume = get_emergency_plan_volume_gb()
     duration = get_emergency_plan_duration_days()
     text = (
-        f"⚙️ تنظیمات پیش‌فرض طرح اضطراری\n\n"
-        f"📊 حجم پیش‌فرض کانفیگ جدید: {'نامحدود' if volume == 0 else f'{volume} گیگ'}\n"
-        f"⏰ مدت اعتبار پیش‌فرض: {duration} روز\n\n"
-        f"⚠️ اشتراک اضطراری بعد از پایان این مدت به‌صورت خودکار "
-        f"هم از دیتابیس هم از پنل حذف می‌شود."
+        f"⚙️ Emergency Plan Default Settings\n\n"
+        f"📊 Default volume for new configs: {'Unlimited' if volume == 0 else f'{volume} GB'}\n"
+        f"⏰ Default validity duration: {duration} days\n\n"
+        f"⚠️ Emergency subscriptions are automatically removed from both the database "
+        f"and the panel once this duration ends."
     )
     keyboard = [
-        [InlineKeyboardButton("✏️ ویرایش حجم", callback_data="admin_emergency_edit_volume")],
-        [InlineKeyboardButton("✏️ ویرایش مدت", callback_data="admin_emergency_edit_duration")],
+        [InlineKeyboardButton("✏️ Edit Volume", callback_data="admin_emergency_edit_volume")],
+        [InlineKeyboardButton("✏️ Edit Duration", callback_data="admin_emergency_edit_duration")],
         [InlineKeyboardButton("🔙 Back", callback_data="admin_emergency_settings")]
     ]
     return text, InlineKeyboardMarkup(keyboard)
-
 
 async def admin_emergency_plan_settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -2465,7 +2601,6 @@ async def admin_emergency_plan_settings_menu(update: Update, context: ContextTyp
         return
     text, reply_markup = _emergency_plan_defaults_text_and_keyboard()
     await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=None)
-
 
 async def admin_emergency_edit_volume_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -2477,13 +2612,12 @@ async def admin_emergency_edit_volume_start(update: Update, context: ContextType
     from bot_settings import get_emergency_plan_volume_gb
     current = get_emergency_plan_volume_gb()
     await query.edit_message_text(
-        f"✏️ ویرایش حجم پیش‌فرض طرح اضطراری\n\n"
-        f"📊 مقدار فعلی: {'نامحدود' if current == 0 else f'{current} گیگ'}\n\n"
-        f"لطفاً مقدار جدید را به گیگابایت وارد کنید (برای نامحدود، 0 بزنید):\n\n"
-        f"⚠️ /cancel برای انصراف"
+        f"✏️ Edit Emergency Plan Default Volume\n\n"
+        f"📊 Current value: {'Unlimited' if current == 0 else f'{current} GB'}\n\n"
+        f"Please enter the new value in GB (enter 0 for unlimited):\n\n"
+        f"⚠️ Send /cancel to abort."
     )
     return ADMIN_EMERGENCY_VOLUME_INPUT
-
 
 async def admin_emergency_edit_volume_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
@@ -2497,7 +2631,7 @@ async def admin_emergency_edit_volume_input(update: Update, context: ContextType
             raise ValueError
     except ValueError:
         await update.message.reply_text(
-            "❌ لطفاً یک عدد صحیح معتبر وارد کنید (برای نامحدود 0 بزنید):"
+            "❌ Please enter a valid integer (enter 0 for unlimited):"
         )
         return ADMIN_EMERGENCY_VOLUME_INPUT
 
@@ -2509,20 +2643,19 @@ async def admin_emergency_edit_volume_input(update: Update, context: ContextType
         from logger_bot import log_admin_action
         admin = update.effective_user
         await log_admin_action(
-            context.bot, admin_id=admin.id, action="تغییر حجم پیش‌فرض طرح اضطراری",
+            context.bot, admin_id=admin.id, action="Change emergency plan default volume",
             target_user_id=None,
-            details=f"مقدار قبلی: {old_value} گیگ\nمقدار جدید: {volume} گیگ",
+            details=f"Previous value: {old_value} GB\nNew value: {volume} GB",
             username=admin.username, first_name=admin.first_name, last_name=admin.last_name
         )
     except Exception as e:
         logger.error(f"Error logging admin action: {e}")
 
     await update.message.reply_text(
-        f"✅ حجم پیش‌فرض طرح اضطراری به {'نامحدود' if volume == 0 else f'{volume} گیگ'} تغییر کرد.",
+        f"✅ Emergency plan default volume changed to {'Unlimited' if volume == 0 else f'{volume} GB'}.",
         reply_markup=get_main_menu()
     )
     return ConversationHandler.END
-
 
 async def admin_emergency_edit_duration_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -2534,10 +2667,10 @@ async def admin_emergency_edit_duration_start(update: Update, context: ContextTy
     from bot_settings import get_emergency_plan_duration_days
     current = get_emergency_plan_duration_days()
     await query.edit_message_text(
-        f"✏️ ویرایش مدت پیش‌فرض طرح اضطراری\n\n"
-        f"⏰ مقدار فعلی: {current} روز\n\n"
-        f"لطفاً مقدار جدید را به روز وارد کنید:\n\n"
-        f"⚠️ /cancel برای انصراف"
+        f"✏️ Edit Emergency Plan Default Duration\n\n"
+        f"⏰ Current value: {current} days\n\n"
+        f"Please enter the new value in days:\n\n"
+        f"⚠️ Send /cancel to abort."
     )
     return ADMIN_EMERGENCY_DURATION_INPUT
 
@@ -2553,7 +2686,7 @@ async def admin_emergency_edit_duration_input(update: Update, context: ContextTy
         if duration < 1:
             raise ValueError
     except ValueError:
-        await update.message.reply_text("❌ لطفاً یک عدد صحیح حداقل ۱ وارد کنید:")
+        await update.message.reply_text("❌ Please enter a valid integer of at least 1:")
         return ADMIN_EMERGENCY_DURATION_INPUT
 
     from bot_settings import get_emergency_plan_duration_days, set_emergency_plan_duration_days
@@ -2564,16 +2697,16 @@ async def admin_emergency_edit_duration_input(update: Update, context: ContextTy
         from logger_bot import log_admin_action
         admin = update.effective_user
         await log_admin_action(
-            context.bot, admin_id=admin.id, action="تغییر مدت پیش‌فرض طرح اضطراری",
+            context.bot, admin_id=admin.id, action="Change emergency plan default duration",
             target_user_id=None,
-            details=f"مقدار قبلی: {old_value} روز\nمقدار جدید: {duration} روز",
+            details=f"Previous value: {old_value} days\nNew value: {duration} days",
             username=admin.username, first_name=admin.first_name, last_name=admin.last_name
         )
     except Exception as e:
         logger.error(f"Error logging admin action: {e}")
 
     await update.message.reply_text(
-        f"✅ مدت پیش‌فرض طرح اضطراری به {duration} روز تغییر کرد.",
+        f"✅ Emergency plan default duration changed to {duration} days.",
         reply_markup=get_main_menu()
     )
     return ConversationHandler.END
@@ -2725,7 +2858,7 @@ def _emergency_settings_text_and_keyboard():
         f"✅ Users with access: {approved_count}"
     )
     keyboard = [
-        [InlineKeyboardButton("⚙️ تنظیمات پیش‌فرض (حجم/مدت)", callback_data="admin_emergency_plan_settings")],  # <-- جدید
+        [InlineKeyboardButton("⚙️ Default Settings (Volume/Duration)", callback_data="admin_emergency_plan_settings")],
         [InlineKeyboardButton("🌐 Proxy Management", callback_data="admin_emergency_proxy_settings")],
         [InlineKeyboardButton(f"⏳ Pending Requests ({pending_count})", callback_data="admin_emergency_pending")],
         [InlineKeyboardButton("👥 User Access Management", callback_data="admin_emergency_users_menu")],
@@ -2770,7 +2903,6 @@ async def admin_emergency_pending_menu(update: Update, context: ContextTypes.DEF
         parse_mode=None
     )
 
-
 async def admin_emergency_review_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -2782,20 +2914,20 @@ async def admin_emergency_review_user(update: Update, context: ContextTypes.DEFA
     name = (user.get('first_name') or user.get('username') or str(target_user_id)) if user else str(target_user_id)
 
     keyboard = [
-        [InlineKeyboardButton("🔧 فقط کانفیگ", callback_data=f"admin_emergency_grant_config_{target_user_id}")],
-        [InlineKeyboardButton("🌐 فقط پروکسی", callback_data=f"admin_emergency_grant_proxy_{target_user_id}")],
-        [InlineKeyboardButton("✅ هردو", callback_data=f"admin_emergency_grant_both_{target_user_id}")],
-        [InlineKeyboardButton("❌ رد کردن", callback_data=f"admin_emergency_deny_{target_user_id}")],
+        [InlineKeyboardButton("🔧 Config Only", callback_data=f"admin_emergency_grant_config_{target_user_id}")],
+        [InlineKeyboardButton("🌐 Proxy Only", callback_data=f"admin_emergency_grant_proxy_{target_user_id}")],
+        [InlineKeyboardButton("✅ Both", callback_data=f"admin_emergency_grant_both_{target_user_id}")],
+        [InlineKeyboardButton("❌ Deny", callback_data=f"admin_emergency_deny_{target_user_id}")],
         [InlineKeyboardButton("🔙 Back", callback_data="admin_emergency_pending")]
     ]
     await query.edit_message_text(
-        f"👤 User: {html_lib.escape(str(name))} (`{target_user_id}`)\n\nنوع دسترسی را انتخاب کنید:",
+        f"👤 User: {html_lib.escape(str(name))} (`{target_user_id}`)\n\nPlease select the access type:",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode=None
     )
 
 async def admin_emergency_grant(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """کار مشترک برای تایید از هر دو مسیر: هشدار pending و User Access Management"""
+    """Shared logic for granting access from both the pending-alert flow and User Access Management"""
     query = update.callback_query
     await query.answer()
     if not is_admin(query.from_user.id):
@@ -2815,14 +2947,17 @@ async def admin_emergency_grant(update: Update, context: ContextTypes.DEFAULT_TY
     admin = query.from_user
     db.set_emergency_access(target_user_id, access_type, admin_id=admin.id)
 
-    type_labels = {"config": "🔧 فقط کانفیگ", "proxy": "🌐 فقط پروکسی", "both": "✅ کانفیگ و پروکسی"}
+    # English labels for admin-facing log/reply
+    type_labels_en = {"config": "🔧 Config Only", "proxy": "🌐 Proxy Only", "both": "✅ Config & Proxy"}
+    # Persian labels for the message sent to the end user
+    type_labels_fa = {"config": "🔧 فقط کانفیگ", "proxy": "🌐 فقط پروکسی", "both": "✅ کانفیگ و پروکسی"}
 
     try:
         from logger_bot import log_admin_action
         await log_admin_action(
-            context.bot, admin_id=admin.id, action="تایید دسترسی طرح اضطراری",
+            context.bot, admin_id=admin.id, action="Approve emergency plan access",
             target_user_id=target_user_id,
-            details=f"نوع دسترسی: {type_labels[access_type]}",
+            details=f"Access type: {type_labels_en[access_type]}",
             username=admin.username, first_name=admin.first_name, last_name=admin.last_name
         )
     except Exception as e:
@@ -2833,24 +2968,23 @@ async def admin_emergency_grant(update: Update, context: ContextTypes.DEFAULT_TY
             chat_id=target_user_id,
             text=(
                 f"✅ درخواست شما برای طرح اضطراری تایید شد!\n\n"
-                f"📋 نوع دسترسی: {type_labels[access_type]}\n\n"
+                f"📋 نوع دسترسی: {type_labels_fa[access_type]}\n\n"
                 f"اکنون می‌توانید از دکمه 🆘 طرح اضطراری استفاده کنید."
             )
         )
     except Exception as e:
         logger.error(f"Could not notify user {target_user_id}: {e}")
 
-    # ============ رفرش پست چراغ با آمار جدید طرح اضطراری ============
     try:
         import lifeline
         await lifeline.post_or_update_lifeline(context.bot)
     except Exception as e:
         logger.error(f"Error refreshing lifeline after emergency grant: {e}")
 
-    await query.edit_message_text(f"✅ Access granted: {type_labels[access_type]} — user {target_user_id}")
+    await query.edit_message_text(f"✅ Access granted: {type_labels_en[access_type]} — user {target_user_id}")
 
 async def admin_emergency_deny_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """شروع رد درخواست - دریافت دلیل از ادمین"""
+    """Start denying a request - ask the admin for a reason"""
     query = update.callback_query
     await query.answer()
     if not is_admin(query.from_user.id):
@@ -2860,16 +2994,15 @@ async def admin_emergency_deny_start(update: Update, context: ContextTypes.DEFAU
     context.user_data['admin_emergency_deny_target'] = target_user_id
 
     await query.message.reply_text(
-        "❌ رد درخواست طرح اضطراری\n\n"
-        "لطفاً دلیل رد کردن را بنویسید (برای کاربر ارسال می‌شود):\n\n"
-        "برای رد بدون ذکر دلیل، فقط علامت - را ارسال کنید.\n"
+        "❌ Deny Emergency Plan Request\n\n"
+        "Please write the reason for denial (this will be sent to the user):\n\n"
+        "To deny without a reason, just send a - character.\n"
         "⚠️ Send /cancel to abort."
     )
     return ADMIN_EMERGENCY_DENY_REASON
 
-
 async def admin_emergency_deny_reason_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """دریافت دلیل و اجرای رد درخواست"""
+    """Receive the reason and perform the denial"""
     text = update.message.text.strip()
 
     if text == "/cancel":
@@ -2890,9 +3023,9 @@ async def admin_emergency_deny_reason_input(update: Update, context: ContextType
     try:
         from logger_bot import log_admin_action
         await log_admin_action(
-            context.bot, admin_id=admin.id, action="رد درخواست طرح اضطراری",
+            context.bot, admin_id=admin.id, action="Deny emergency plan request",
             target_user_id=target_user_id,
-            details=f"دلیل رد: {reason}" if reason else "بدون ذکر دلیل",
+            details=f"Reason: {reason}" if reason else "No reason given",
             username=admin.username, first_name=admin.first_name, last_name=admin.last_name
         )
     except Exception as e:
@@ -2909,7 +3042,7 @@ async def admin_emergency_deny_reason_input(update: Update, context: ContextType
         logger.error(f"Could not notify user {target_user_id}: {e}")
 
     await update.message.reply_text(
-        f"❌ Request denied for user {target_user_id}" + (f"\n📝 دلیل: {reason}" if reason else "")
+        f"❌ Request denied for user {target_user_id}" + (f"\n📝 Reason: {reason}" if reason else "")
     )
 
     context.user_data.pop('admin_emergency_deny_target', None)
@@ -2937,7 +3070,6 @@ async def admin_emergency_users_menu(update: Update, context: ContextTypes.DEFAU
     text = f"👥 {len(users)} user(s) with emergency access." if users else "👥 No users currently have emergency access."
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
 
-
 async def admin_emergency_manage_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -2946,18 +3078,17 @@ async def admin_emergency_manage_user(update: Update, context: ContextTypes.DEFA
 
     target_user_id = int(query.data.replace("admin_emergency_manage_", ""))
     keyboard = [
-        [InlineKeyboardButton("🔧 فقط کانفیگ", callback_data=f"admin_emergency_grant_config_{target_user_id}")],
-        [InlineKeyboardButton("🌐 فقط پروکسی", callback_data=f"admin_emergency_grant_proxy_{target_user_id}")],
-        [InlineKeyboardButton("✅ هردو", callback_data=f"admin_emergency_grant_both_{target_user_id}")],
-        [InlineKeyboardButton("🗑 حذف دسترسی", callback_data=f"admin_emergency_revoke_{target_user_id}")],
+        [InlineKeyboardButton("🔧 Config Only", callback_data=f"admin_emergency_grant_config_{target_user_id}")],
+        [InlineKeyboardButton("🌐 Proxy Only", callback_data=f"admin_emergency_grant_proxy_{target_user_id}")],
+        [InlineKeyboardButton("✅ Both", callback_data=f"admin_emergency_grant_both_{target_user_id}")],
+        [InlineKeyboardButton("🗑 Remove Access", callback_data=f"admin_emergency_revoke_{target_user_id}")],
         [InlineKeyboardButton("🔙 Back", callback_data="admin_emergency_users_menu")]
     ]
     await query.edit_message_text(
-        f"👤 User: `{target_user_id}`\n\nگزینه مورد نظر را انتخاب کنید:",
+        f"👤 User: `{target_user_id}`\n\nPlease select an option:",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode=None
     )
-
 
 async def admin_emergency_revoke(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -2972,7 +3103,7 @@ async def admin_emergency_revoke(update: Update, context: ContextTypes.DEFAULT_T
         from logger_bot import log_admin_action
         admin = query.from_user
         await log_admin_action(
-            context.bot, admin_id=admin.id, action="حذف دسترسی طرح اضطراری",
+            context.bot, admin_id=admin.id, action="Remove emergency plan access",
             target_user_id=target_user_id, details="",
             username=admin.username, first_name=admin.first_name, last_name=admin.last_name
         )
@@ -2998,7 +3129,7 @@ async def admin_emergency_add_user_start(update: Update, context: ContextTypes.D
         return ConversationHandler.END
 
     await query.edit_message_text(
-        "➕ Add User to Emergency Plan\n\nلطفاً آیدی عددی کاربر را ارسال کنید:\n\n⚠️ Send /cancel to abort.",
+        "➕ Add User to Emergency Plan\n\nPlease send the user's numeric ID:\n\n⚠️ Send /cancel to abort.",
         parse_mode=None
     )
     return ADMIN_EMERGENCY_ADD_USER_ID
@@ -3011,17 +3142,17 @@ async def admin_emergency_add_user_id_input(update: Update, context: ContextType
         return ConversationHandler.END
 
     if not text.isdigit():
-        await update.message.reply_text("❌ آیدی باید فقط عدد باشد. دوباره ارسال کنید:\n\n⚠️ Send /cancel to abort.")
+        await update.message.reply_text("❌ The ID must be numeric only. Please send it again:\n\n⚠️ Send /cancel to abort.")
         return ADMIN_EMERGENCY_ADD_USER_ID
 
     target_user_id = int(text)
     keyboard = [
-        [InlineKeyboardButton("🔧 فقط کانفیگ", callback_data=f"admin_emergency_grant_config_{target_user_id}")],
-        [InlineKeyboardButton("🌐 فقط پروکسی", callback_data=f"admin_emergency_grant_proxy_{target_user_id}")],
-        [InlineKeyboardButton("✅ هردو", callback_data=f"admin_emergency_grant_both_{target_user_id}")],
+        [InlineKeyboardButton("🔧 Config Only", callback_data=f"admin_emergency_grant_config_{target_user_id}")],
+        [InlineKeyboardButton("🌐 Proxy Only", callback_data=f"admin_emergency_grant_proxy_{target_user_id}")],
+        [InlineKeyboardButton("✅ Both", callback_data=f"admin_emergency_grant_both_{target_user_id}")],
     ]
     await update.message.reply_text(
-        f"👤 User ID: {target_user_id}\n\nنوع دسترسی را انتخاب کنید:",
+        f"👤 User ID: {target_user_id}\n\nPlease select the access type:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
     return ConversationHandler.END
@@ -3033,18 +3164,17 @@ def _plan_preset_keyboard():
         [InlineKeyboardButton(v, callback_data=f"admin_manual_plan_{k}")]
         for k, v in MANUAL_PLAN_PRESETS.items()
     ]
-    keyboard.append([InlineKeyboardButton("✏️ نام دلخواه", callback_data="admin_manual_plan_other")])
+    keyboard.append([InlineKeyboardButton("✏️ Custom Name", callback_data="admin_manual_plan_other")])
     return InlineKeyboardMarkup(keyboard)
 
 
 def _priority_keyboard(prefix: str):
     keyboard = [
-        [InlineKeyboardButton("🥇 اولویت اول (اصلی)", callback_data=f"{prefix}_1")],
-        [InlineKeyboardButton("🥈 اولویت دوم", callback_data=f"{prefix}_2")],
-        [InlineKeyboardButton("🥉 اولویت سوم", callback_data=f"{prefix}_3")],
+        [InlineKeyboardButton("🥇 First Priority (Main)", callback_data=f"{prefix}_1")],
+        [InlineKeyboardButton("🥈 Second Priority", callback_data=f"{prefix}_2")],
+        [InlineKeyboardButton("🥉 Third Priority", callback_data=f"{prefix}_3")],
     ]
     return InlineKeyboardMarkup(keyboard)
-
 
 async def admin_manual_sub_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -3053,10 +3183,35 @@ async def admin_manual_sub_start(update: Update, context: ContextTypes.DEFAULT_T
         await query.edit_message_text("⛔️ You do not have admin access.")
         return ConversationHandler.END
 
+    keyboard = [
+        [InlineKeyboardButton("👤 یک کاربر خاص", callback_data="admin_manual_target_single")],
+        [InlineKeyboardButton("👥 همه کاربران", callback_data="admin_manual_target_all")],
+    ]
     await query.edit_message_text(
-        "➕ افزودن اشتراک دستی\n\n"
-        "👤 لطفاً آیدی عددی کاربر را ارسال کنید:\n\n"
-        "⚠️ برای انصراف /cancel بفرستید."
+        "➕ افزودن اشتراک دستی\n\nاین اشتراک برای چه کسانی ثبت شود؟",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return ADMIN_MANUAL_SUB_TARGET
+
+
+async def admin_manual_sub_target_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id):
+        return ConversationHandler.END
+
+    if query.data == "admin_manual_target_all":
+        context.user_data['manual_sub_target'] = 'all'
+        user_count = len(db.get_all_user_ids())
+        await query.edit_message_text(
+            f"👥 این اشتراک برای همه‌ی {user_count} کاربر ثبت خواهد شد.\n\n"
+            f"📦 لطفاً طرح مورد نظر را انتخاب کنید:",
+            reply_markup=_plan_preset_keyboard()
+        )
+        return ADMIN_MANUAL_SUB_PLAN_NAME
+
+    await query.edit_message_text(
+        "👤 لطفاً آیدی عددی کاربر مورد نظر را ارسال کنید:\n\n⚠️ برای انصراف /cancel را ارسال کنید."
     )
     return ADMIN_MANUAL_SUB_USER_ID
 
@@ -3069,7 +3224,7 @@ async def admin_manual_sub_user_id(update: Update, context: ContextTypes.DEFAULT
 
     if not text.isdigit():
         await update.message.reply_text(
-            "❌ آیدی باید فقط عدد باشد. دوباره ارسال کنید:\n\n⚠️ /cancel برای انصراف"
+            "❌ The ID must be numeric only. Please send it again:\n\n⚠️ Send /cancel to abort."
         )
         return ADMIN_MANUAL_SUB_USER_ID
 
@@ -3077,18 +3232,19 @@ async def admin_manual_sub_user_id(update: Update, context: ContextTypes.DEFAULT
     target_user = db.get_user(target_user_id)
     if not target_user:
         await update.message.reply_text(
-            "❌ کاربری با این آیدی پیدا نشد.\n\n"
-            "آیدی دیگری بفرستید یا /cancel کنید."
+            "❌ No user found with this ID.\n\n"
+            "Please send a different ID or /cancel to abort."
         )
         return ADMIN_MANUAL_SUB_USER_ID
 
     context.user_data['manual_sub_target'] = target_user_id
     await update.message.reply_text(
-        "📦 لطفاً طرح مورد نظر را انتخاب کنید:",
+        "📦 Please select the desired plan:",
         reply_markup=_plan_preset_keyboard()
     )
     return ADMIN_MANUAL_SUB_PLAN_NAME
 
+
 async def admin_manual_sub_plan_name_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     if text == "/cancel":
@@ -3096,41 +3252,22 @@ async def admin_manual_sub_plan_name_text(update: Update, context: ContextTypes.
         return ConversationHandler.END
 
     if not text:
-        await update.message.reply_text("❌ نام طرح نمی‌تواند خالی باشد. دوباره وارد کنید:")
+        await update.message.reply_text("❌ Plan name cannot be empty. Please enter it again:")
         return ADMIN_MANUAL_SUB_PLAN_NAME
 
     context.user_data['manual_sub_plan_name'] = text
-    # چون نام دلخواه ممکن است فارسی/غیر ASCII باشد، آن را به یک شناسه‌ی کوتاه و ثابت تبدیل می‌کنیم
+    # Custom names may be Persian/non-ASCII, so convert to a short, stable slug for the email
     context.user_data['manual_sub_plan_key'] = _slugify_plan_name(text)
 
     await update.message.reply_text(
-        f"✅ طرح: {text}\n\n"
-        f"📅 لطفاً اعتبار اشتراک را وارد کنید:\n"
-        f"- یا تعداد روز (مثال: 30)\n"
-        f"- یا تاریخ دقیق انقضا به فرمت YYYY-MM-DD\n\n"
-        f"⚠️ /cancel برای انصراف"
+        f"✅ Plan: {text}\n\n"
+        f"📅 Please enter the subscription validity:\n"
+        f"- either a number of days (e.g. 30)\n"
+        f"- or an exact expiry date in YYYY-MM-DD format\n\n"
+        f"⚠️ Send /cancel to abort."
     )
     return ADMIN_MANUAL_SUB_EXPIRY
 
-async def admin_manual_sub_plan_name_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    if text == "/cancel":
-        await update.message.reply_text("❌ Operation cancelled.", reply_markup=get_main_menu())
-        return ConversationHandler.END
-
-    if not text:
-        await update.message.reply_text("❌ نام طرح نمی‌تواند خالی باشد. دوباره وارد کنید:")
-        return ADMIN_MANUAL_SUB_PLAN_NAME
-
-    context.user_data['manual_sub_plan_name'] = text
-    await update.message.reply_text(
-        f"✅ طرح: {text}\n\n"
-        f"📅 لطفاً اعتبار اشتراک را وارد کنید:\n"
-        f"- یا تعداد روز (مثال: 30)\n"
-        f"- یا تاریخ دقیق انقضا به فرمت YYYY-MM-DD\n\n"
-        f"⚠️ /cancel برای انصراف"
-    )
-    return ADMIN_MANUAL_SUB_EXPIRY
 
 async def admin_manual_sub_expiry_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
@@ -3142,7 +3279,7 @@ async def admin_manual_sub_expiry_input(update: Update, context: ContextTypes.DE
     if text.isdigit():
         duration_days = int(text)
         if duration_days < 1:
-            await update.message.reply_text("❌ تعداد روز باید حداقل ۱ باشد. دوباره وارد کنید:")
+            await update.message.reply_text("❌ The number of days must be at least 1. Please enter it again:")
             return ADMIN_MANUAL_SUB_EXPIRY
     else:
         try:
@@ -3150,26 +3287,26 @@ async def admin_manual_sub_expiry_input(update: Update, context: ContextTypes.DE
             duration_days = (expiry_date - datetime.now()).days
             if duration_days < 1:
                 await update.message.reply_text(
-                    "❌ تاریخ انقضا باید در آینده باشد. دوباره وارد کنید:"
+                    "❌ The expiry date must be in the future. Please enter it again:"
                 )
                 return ADMIN_MANUAL_SUB_EXPIRY
         except ValueError:
             await update.message.reply_text(
-                "❌ فرمت نامعتبر است.\n"
-                "یا عدد روز (مثال: 30) یا تاریخ YYYY-MM-DD وارد کنید:"
+                "❌ Invalid format.\n"
+                "Enter either a number of days (e.g. 30) or a date in YYYY-MM-DD format:"
             )
             return ADMIN_MANUAL_SUB_EXPIRY
 
     context.user_data['manual_sub_duration'] = duration_days
 
-    # ============ درخواست حجم (جدید) ============
     await update.message.reply_text(
-        "📊 لطفاً حجم این اشتراک را به گیگابایت وارد کنید:\n"
-        "مثال: 50\n\n"
-        "⚠️ برای نامحدود، عدد 0 را وارد کنید.\n"
-        "⚠️ /cancel برای انصراف"
+        "📊 Please enter the volume for this subscription in GB:\n"
+        "Example: 50\n\n"
+        "⚠️ Enter 0 for unlimited.\n"
+        "⚠️ Send /cancel to abort."
     )
     return ADMIN_MANUAL_SUB_VOLUME
+
 
 async def admin_manual_sub_plan_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -3179,27 +3316,28 @@ async def admin_manual_sub_plan_selected(update: Update, context: ContextTypes.D
 
     data = query.data
     if data == "admin_manual_plan_other":
-        await query.edit_message_text("✏️ لطفاً نام طرح دلخواه را تایپ کنید:")
+        await query.edit_message_text("✏️ Please type the custom plan name:")
         return ADMIN_MANUAL_SUB_PLAN_NAME
 
     key = data.replace("admin_manual_plan_", "")
     plan_name = MANUAL_PLAN_PRESETS.get(key, key)
     context.user_data['manual_sub_plan_name'] = plan_name
-    # کلید پریست (مثل balanced, fair, pro, ...) از قبل ASCII-safe است؛
-    # همین را به‌عنوان شناسه‌ی طرح در email استفاده می‌کنیم
+    # Preset keys (balanced, fair, pro, ...) are already ASCII-safe;
+    # use the key itself as the plan identifier in the email
     context.user_data['manual_sub_plan_key'] = key
 
     await query.edit_message_text(
-        f"✅ طرح انتخاب شد: {plan_name}\n\n"
-        f"📅 لطفاً اعتبار اشتراک را وارد کنید:\n"
-        f"- یا تعداد روز (مثال: 30)\n"
-        f"- یا تاریخ دقیق انقضا به فرمت YYYY-MM-DD (مثال: 2026-08-20)\n\n"
-        f"⚠️ /cancel برای انصراف"
+        f"✅ Plan selected: {plan_name}\n\n"
+        f"📅 Please enter the subscription validity:\n"
+        f"- either a number of days (e.g. 30)\n"
+        f"- or an exact expiry date in YYYY-MM-DD format (e.g. 2026-08-20)\n\n"
+        f"⚠️ Send /cancel to abort."
     )
     return ADMIN_MANUAL_SUB_EXPIRY
 
+
 async def admin_manual_sub_volume_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """دریافت مقدار حجم (GB) برای اشتراک دستی"""
+    """Receive the volume (GB) for a manual subscription"""
     text = update.message.text.strip()
     if text == "/cancel":
         await update.message.reply_text("❌ Operation cancelled.", reply_markup=get_main_menu())
@@ -3213,17 +3351,18 @@ async def admin_manual_sub_volume_input(update: Update, context: ContextTypes.DE
             raise ValueError
     except ValueError:
         await update.message.reply_text(
-            "❌ لطفاً یک عدد صحیح (گیگابایت) وارد کنید (برای نامحدود 0 بزنید):"
+            "❌ Please enter a valid integer in GB (enter 0 for unlimited):"
         )
         return ADMIN_MANUAL_SUB_VOLUME
 
     context.user_data['manual_sub_volume'] = volume
 
     await update.message.reply_text(
-        "🔢 لطفاً اولویت کانفیگ‌هایی که الان وارد می‌کنید را انتخاب کنید:",
+        "🔢 Please select the priority for the config(s) you're about to enter:",
         reply_markup=_priority_keyboard("admin_manual_priority")
     )
     return ADMIN_MANUAL_SUB_PRIORITY
+
 
 async def admin_manual_sub_priority_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -3235,108 +3374,148 @@ async def admin_manual_sub_priority_selected(update: Update, context: ContextTyp
     context.user_data['manual_sub_priority'] = priority
 
     await query.edit_message_text(
-        "🔧 لطفاً کانفیگ(های) این اشتراک را ارسال کنید.\n"
-        "می‌توانید چند کانفیگ بفرستید؛ هرکدام در یک خط جداگانه.\n\n"
-        "مثال:\nvless://...\nvless://...\n\n"
-        "⚠️ /cancel برای انصراف"
+        "🔧 Please send the config(s) for this subscription.\n"
+        "You can send several configs; put each one on its own line.\n\n"
+        "Example:\nvless://...\nvless://...\n\n"
+        "⚠️ Send /cancel to abort."
     )
     return ADMIN_MANUAL_SUB_CONFIG
+
 
 async def admin_manual_sub_config_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     if text == "/cancel":
         await update.message.reply_text("❌ Operation cancelled.", reply_markup=get_main_menu())
-        context.user_data.pop('manual_sub_target', None)
-        context.user_data.pop('manual_sub_plan_name', None)
-        context.user_data.pop('manual_sub_plan_key', None)   # <-- جدید
-        context.user_data.pop('manual_sub_duration', None)
-        context.user_data.pop('manual_sub_priority', None)
-        context.user_data.pop('manual_sub_volume', None)
+        for key in ('manual_sub_target', 'manual_sub_plan_name', 'manual_sub_plan_key',
+                    'manual_sub_duration', 'manual_sub_priority', 'manual_sub_volume'):
+            context.user_data.pop(key, None)
         return ConversationHandler.END
 
     links = [l.strip() for l in text.split('\n') if l.strip()]
     if not links:
-        await update.message.reply_text("❌ حداقل یک کانفیگ وارد کنید:")
+        await update.message.reply_text("❌ Please enter at least one config:")
         return ADMIN_MANUAL_SUB_CONFIG
 
-    target_user_id = context.user_data.get('manual_sub_target')
+    target = context.user_data.get('manual_sub_target')
     plan_name = context.user_data.get('manual_sub_plan_name')
     plan_key = context.user_data.get('manual_sub_plan_key', 'plan')
     duration_days = context.user_data.get('manual_sub_duration', 30)
     volume = context.user_data.get('manual_sub_volume', 0)
     priority = context.user_data.get('manual_sub_priority', 1)
 
-    if not target_user_id or not plan_name:
-        await update.message.reply_text("❌ خطا! لطفاً دوباره تلاش کنید.", reply_markup=get_main_menu())
+    if not target or not plan_name:
+        await update.message.reply_text("❌ Error! Please try again.", reply_markup=get_main_menu())
         return ConversationHandler.END
-
-    # ============ ساخت email بر اساس طرح (بدون تایم‌استمپ و بدون افشای آیدی خام کاربر در نمایش) ============
-    # نکته: چون هر کاربر فقط یک‌بار از هر طرح باید داشته باشد، این ایمیل برای
-    # (کاربر + طرح) یکتا و ثابت است؛ تلاش دوباره برای همان طرح همان email را می‌سازد.
-    email = f"manual_{target_user_id}_{plan_key}"
-    subscription_id = db.add_subscription(
-        user_id=target_user_id,
-        protocol='v2ray',
-        duration_days=duration_days,
-        plan_type='manual',
-        initial_volume=volume,
-        plan_name=plan_name,
-        email=email,
-        panel_id=None
-    )
-
-    if not subscription_id:
-        await update.message.reply_text("❌ خطا در ثبت اشتراک. لطفاً دوباره تلاش کنید.", reply_markup=get_main_menu())
-        return ConversationHandler.END
-
-    for link in links:
-        db.add_manual_config(subscription_id, link, priority)
 
     admin = update.effective_user
-    try:
-        from logger_bot import log_admin_action
-        await log_admin_action(
-            context.bot,
-            admin_id=admin.id,
-            action="افزودن اشتراک دستی",
-            target_user_id=target_user_id,
-            details=(
-                f"📦 طرح: {plan_name}\n"
-                f"⏰ مدت: {duration_days} روز\n"
-                f"🔢 اولویت: {priority}\n"
-                f"🔗 تعداد کانفیگ: {len(links)}"
-            ),
-            username=admin.username,
-            first_name=admin.first_name,
-            last_name=admin.last_name
-        )
-    except Exception as e:
-        logger.error(f"Error logging admin action: {e}")
 
-    await update.message.reply_text(
-        f"✅ اشتراک دستی با موفقیت ثبت شد!\n\n"
-        f"👤 کاربر: <code>{target_user_id}</code>\n"
-        f"📦 طرح: {plan_name}\n"
-        f"⏰ مدت: {duration_days} روز\n"
-        f"📊 حجم: {'نامحدود' if volume == 0 else f'{volume} گیگ'}\n"
-        f"🔢 تعداد کانفیگ: {len(links)}",
-        parse_mode='HTML',
-        reply_markup=get_main_menu()
-    )
-    
-    try:
-        await context.bot.send_message(
-            chat_id=target_user_id,
-            text=(
-                f"🎉 یک اشتراک جدید برای شما توسط پشتیبانی ثبت شد!\n\n"
-                f"📦 طرح: {plan_name}\n"
-                f"⏰ مدت: {duration_days} روز\n"
-                f"📊 حجم: {'نامحدود' if volume == 0 else f'{volume} گیگ'}\n\n"
-                f"برای دریافت کانفیگ به بخش «📒 اشتراک ها» مراجعه کنید."
+    if target == 'all':
+        user_ids = db.get_all_user_ids()
+        success_count = 0
+        fail_count = 0
+        for uid in user_ids:
+            email = f"manual_{uid}_{plan_key}"
+            subscription_id = db.add_subscription(
+                user_id=uid, protocol='v2ray', duration_days=duration_days,
+                plan_type='manual', initial_volume=volume, plan_name=plan_name,
+                email=email, panel_id=None
             )
+            if not subscription_id:
+                fail_count += 1
+                continue
+            for link in links:
+                db.add_manual_config(subscription_id, link, priority)
+            success_count += 1
+            try:
+                await context.bot.send_message(
+                    chat_id=uid,
+                    text=(
+                        f"🎉 یک اشتراک جدید برای شما توسط پشتیبانی ثبت شد!\n\n"
+                        f"📦 طرح: {plan_name}\n"
+                        f"⏰ مدت: {duration_days} روز\n"
+                        f"📊 حجم: {'نامحدود' if volume == 0 else f'{volume} گیگ'}\n\n"
+                        f"برای دریافت کانفیگ به بخش «📒 اشتراک ها» مراجعه کنید."
+                    )
+                )
+            except Exception as e:
+                logger.error(f"Could not notify user {uid}: {e}")
+            await asyncio.sleep(0.05)
+
+        try:
+            from logger_bot import log_admin_action
+            await log_admin_action(
+                context.bot, admin_id=admin.id, action="Add manual subscription to ALL users",
+                target_user_id=None,
+                details=(
+                    f"📦 Plan: {plan_name}\n⏰ Duration: {duration_days} days\n"
+                    f"🔢 Priority: {priority}\n🔗 Config count: {len(links)}\n"
+                    f"👥 Users affected: {success_count} (failed: {fail_count})"
+                ),
+                username=admin.username, first_name=admin.first_name, last_name=admin.last_name
+            )
+        except Exception as e:
+            logger.error(f"Error logging admin action: {e}")
+
+        await update.message.reply_text(
+            f"✅ اشتراک برای {success_count} کاربر با موفقیت ثبت شد."
+            + (f"\n⚠️ {fail_count} مورد با خطا مواجه شد." if fail_count else ""),
+            reply_markup=get_main_menu()
         )
-    except Exception as e:
-        logger.error(f"Could not notify user {target_user_id}: {e}")
+
+    else:
+        target_user_id = target
+        email = f"manual_{target_user_id}_{plan_key}"
+        subscription_id = db.add_subscription(
+            user_id=target_user_id, protocol='v2ray', duration_days=duration_days,
+            plan_type='manual', initial_volume=volume, plan_name=plan_name,
+            email=email, panel_id=None
+        )
+        if not subscription_id:
+            await update.message.reply_text("❌ Error registering subscription. Please try again.", reply_markup=get_main_menu())
+            return ConversationHandler.END
+
+        for link in links:
+            db.add_manual_config(subscription_id, link, priority)
+
+        try:
+            from logger_bot import log_admin_action
+            await log_admin_action(
+                context.bot, admin_id=admin.id, action="Add manual subscription",
+                target_user_id=target_user_id,
+                details=(
+                    f"📦 Plan: {plan_name}\n⏰ Duration: {duration_days} days\n"
+                    f"🔢 Priority: {priority}\n🔗 Config count: {len(links)}"
+                ),
+                username=admin.username, first_name=admin.first_name, last_name=admin.last_name
+            )
+        except Exception as e:
+            logger.error(f"Error logging admin action: {e}")
+
+        await update.message.reply_text(
+            f"✅ Manual subscription registered successfully!\n\n"
+            f"👤 User: <code>{target_user_id}</code>\n"
+            f"📦 Plan: {plan_name}\n"
+            f"⏰ Duration: {duration_days} days\n"
+            f"📊 Volume: {'Unlimited' if volume == 0 else f'{volume} GB'}\n"
+            f"🔢 Priority: {priority}\n"
+            f"🔢 Config count: {len(links)}",
+            parse_mode='HTML',
+            reply_markup=get_main_menu()
+        )
+
+        try:
+            await context.bot.send_message(
+                chat_id=target_user_id,
+                text=(
+                    f"🎉 یک اشتراک جدید برای شما توسط پشتیبانی ثبت شد!\n\n"
+                    f"📦 طرح: {plan_name}\n"
+                    f"⏰ مدت: {duration_days} روز\n"
+                    f"📊 حجم: {'نامحدود' if volume == 0 else f'{volume} گیگ'}\n\n"
+                    f"برای دریافت کانفیگ به بخش «📒 اشتراک ها» مراجعه کنید."
+                )
+            )
+        except Exception as e:
+            logger.error(f"Could not notify user {target_user_id}: {e}")
 
     for key in ('manual_sub_target', 'manual_sub_plan_name', 'manual_sub_plan_key',
                 'manual_sub_duration', 'manual_sub_priority', 'manual_sub_volume'):
@@ -3345,7 +3524,6 @@ async def admin_manual_sub_config_input(update: Update, context: ContextTypes.DE
     return ConversationHandler.END
 
 # ============ Admin: Add Config to Existing Subscription ============
-
 async def admin_addconfig_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -3353,12 +3531,70 @@ async def admin_addconfig_start(update: Update, context: ContextTypes.DEFAULT_TY
         await query.edit_message_text("⛔️ You do not have admin access.")
         return ConversationHandler.END
 
+    keyboard = [
+        [InlineKeyboardButton("👤 یک کاربر خاص", callback_data="admin_addconfig_target_single")],
+        [InlineKeyboardButton("🧩 همه کاربران یک طرح خاص", callback_data="admin_addconfig_target_byplan")],
+    ]
     await query.edit_message_text(
-        "➕ افزودن کانفیگ به اشتراک موجود\n\n"
-        "👤 لطفاً آیدی عددی کاربر را ارسال کنید:\n\n"
-        "⚠️ برای انصراف /cancel بفرستید."
+        "➕ افزودن کانفیگ به اشتراک\n\nاین کانفیگ برای چه کسانی اضافه شود؟",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
-    return ADMIN_ADDCONFIG_USER_ID
+    return ADMIN_ADDCONFIG_TARGET
+
+
+async def admin_addconfig_target_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id):
+        return ConversationHandler.END
+
+    if query.data == "admin_addconfig_target_single":
+        await query.edit_message_text(
+            "👤 Please send the target user's numeric ID:\n\n⚠️ Send /cancel to abort."
+        )
+        return ADMIN_ADDCONFIG_USER_ID
+
+    plan_names = db.get_all_active_plan_names()
+    if not plan_names:
+        await query.edit_message_text("❌ هیچ اشتراک فعالی با نام طرح مشخص یافت نشد.")
+        return ConversationHandler.END
+
+    context.user_data['addconfig_plan_names'] = plan_names
+    keyboard = [
+        [InlineKeyboardButton(name, callback_data=f"admin_addconfig_planidx_{i}")]
+        for i, name in enumerate(plan_names)
+    ]
+    await query.edit_message_text(
+        "📦 لطفاً طرحی را انتخاب کنید که کانفیگ باید به همه‌ی اشتراک‌های فعال آن اضافه شود:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return ADMIN_ADDCONFIG_PLAN_SELECT
+
+
+async def admin_addconfig_plan_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id):
+        return ConversationHandler.END
+
+    idx = int(query.data.replace("admin_addconfig_planidx_", ""))
+    plan_names = context.user_data.get('addconfig_plan_names', [])
+    if idx >= len(plan_names):
+        await query.edit_message_text("❌ این گزینه دیگر معتبر نیست.")
+        return ConversationHandler.END
+
+    plan_name = plan_names[idx]
+    context.user_data['addconfig_mode'] = 'byplan'
+    context.user_data['addconfig_target_plan_name'] = plan_name
+
+    affected_count = len(db.get_active_subscriptions_by_plan_name(plan_name))
+    await query.edit_message_text(
+        f"📦 طرح انتخابی: {plan_name}\n"
+        f"👥 تعداد اشتراک‌های فعال این طرح: {affected_count}\n\n"
+        f"🔢 لطفاً اولویت کانفیگ(های) مورد نظر را انتخاب کنید:",
+        reply_markup=_priority_keyboard("admin_addconfig_priority")
+    )
+    return ADMIN_ADDCONFIG_PRIORITY
 
 
 async def admin_addconfig_user_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3369,7 +3605,7 @@ async def admin_addconfig_user_id(update: Update, context: ContextTypes.DEFAULT_
 
     if not text.isdigit():
         await update.message.reply_text(
-            "❌ آیدی باید فقط عدد باشد. دوباره ارسال کنید:\n\n⚠️ /cancel برای انصراف"
+            "❌ The ID must be numeric only. Please send it again:\n\n⚠️ Send /cancel to abort."
         )
         return ADMIN_ADDCONFIG_USER_ID
 
@@ -3377,14 +3613,14 @@ async def admin_addconfig_user_id(update: Update, context: ContextTypes.DEFAULT_
     target_user = db.get_user(target_user_id)
     if not target_user:
         await update.message.reply_text(
-            "❌ کاربری با این آیدی پیدا نشد.\n\nآیدی دیگری بفرستید یا /cancel کنید."
+            "❌ No user found with this ID.\n\nPlease send a different ID or /cancel to abort."
         )
         return ADMIN_ADDCONFIG_USER_ID
 
     subs = db.get_active_subscriptions(target_user_id)
     if not subs:
         await update.message.reply_text(
-            "ℹ️ این کاربر هیچ اشتراک فعالی ندارد.",
+            "ℹ️ This user has no active subscriptions.",
             reply_markup=get_main_menu()
         )
         return ConversationHandler.END
@@ -3393,10 +3629,10 @@ async def admin_addconfig_user_id(update: Update, context: ContextTypes.DEFAULT_
     context.user_data['addconfig_subs'] = subs
 
     keyboard = []
-    lines = [f"👤 اشتراک‌های فعال کاربر <code>{target_user_id}</code>:\n"]
+    lines = [f"👤 Active subscriptions for user <code>{target_user_id}</code>:\n"]
     for i, sub in enumerate(subs):
         label = sub.get('plan_name') or sub.get('email') or f"#{sub['id']}"
-        lines.append(f"{i+1}. {label} - تا {str(sub.get('end_date'))[:10]}")
+        lines.append(f"{i+1}. {label} - until {str(sub.get('end_date'))[:10]}")
         keyboard.append([InlineKeyboardButton(f"{i+1}. {label}", callback_data=f"admin_addconfig_sub_{i}")])
 
     await update.message.reply_text(
@@ -3416,14 +3652,14 @@ async def admin_addconfig_select_sub(update: Update, context: ContextTypes.DEFAU
     idx = int(query.data.replace("admin_addconfig_sub_", ""))
     subs = context.user_data.get('addconfig_subs', [])
     if idx >= len(subs):
-        await query.edit_message_text("❌ این مورد دیگر معتبر نیست.")
+        await query.edit_message_text("❌ This item is no longer valid.")
         return ConversationHandler.END
 
     sub = subs[idx]
     context.user_data['addconfig_sub_id'] = sub['id']
 
     await query.edit_message_text(
-        "🔢 لطفاً اولویت کانفیگ‌هایی که الان اضافه می‌کنید را انتخاب کنید:",
+        "🔢 Please select the priority for the config(s) you're about to add:",
         reply_markup=_priority_keyboard("admin_addconfig_priority")
     )
     return ADMIN_ADDCONFIG_PRIORITY
@@ -3439,46 +3675,121 @@ async def admin_addconfig_priority_selected(update: Update, context: ContextType
     context.user_data['addconfig_priority'] = priority
 
     await query.edit_message_text(
-        "🔧 لطفاً کانفیگ(های) جدید را ارسال کنید.\n"
-        "می‌توانید چند کانفیگ بفرستید؛ هرکدام در یک خط جداگانه.\n\n"
-        "⚠️ /cancel برای انصراف"
+        "🔧 Please send the new config(s).\n"
+        "You can send several configs; put each one on its own line.\n\n"
+        "⚠️ Send /cancel to abort."
     )
     return ADMIN_ADDCONFIG_LINK
-
 
 async def admin_addconfig_link_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     if text == "/cancel":
         await update.message.reply_text("❌ Operation cancelled.", reply_markup=get_main_menu())
-        for key in ('addconfig_target', 'addconfig_subs', 'addconfig_sub_id', 'addconfig_priority'):
+        for key in ('addconfig_target', 'addconfig_subs', 'addconfig_sub_id', 'addconfig_priority',
+                    'addconfig_mode', 'addconfig_plan_names', 'addconfig_target_plan_name'):
             context.user_data.pop(key, None)
         return ConversationHandler.END
 
     links = [l.strip() for l in text.split('\n') if l.strip()]
     if not links:
-        await update.message.reply_text("❌ حداقل یک کانفیگ وارد کنید:")
+        await update.message.reply_text("❌ Please enter at least one config:")
         return ADMIN_ADDCONFIG_LINK
 
+    priority = context.user_data.get('addconfig_priority', 1)
+    admin = update.effective_user
+
+    if context.user_data.get('addconfig_mode') == 'byplan':
+        plan_name = context.user_data.get('addconfig_target_plan_name')
+        subs = db.get_active_subscriptions_by_plan_name(plan_name) if plan_name else []
+
+        if not subs:
+            await update.message.reply_text("❌ هیچ اشتراک فعالی برای این طرح یافت نشد.", reply_markup=get_main_menu())
+        else:
+            for sub in subs:
+                for link in links:
+                    db.add_manual_config(sub['id'], link, priority)
+
+            try:
+                from logger_bot import log_admin_action
+                await log_admin_action(
+                    context.bot, admin_id=admin.id, action="Add config to ALL subscriptions of a plan",
+                    target_user_id=None,
+                    details=(
+                        f"📦 Plan: {plan_name}\n👥 Subscriptions affected: {len(subs)}\n"
+                        f"🔢 Priority: {priority}\n🔗 Config count: {len(links)}"
+                    ),
+                    username=admin.username, first_name=admin.first_name, last_name=admin.last_name
+                )
+            except Exception as e:
+                logger.error(f"Error logging admin action: {e}")
+
+            await update.message.reply_text(
+                f"✅ {len(links)} کانفیگ به {len(subs)} اشتراک فعال طرح «{plan_name}» اضافه شد.",
+                reply_markup=get_main_menu()
+            )
+
+            for sub in subs:
+                try:
+                    await context.bot.send_message(
+                        chat_id=sub['user_id'],
+                        text=(
+                            f"🎉 کانفیگ جدیدی به اشتراک شما اضافه شد!\n\n"
+                            f"📦 طرح: {plan_name}\n"
+                            f"🔢 تعداد کانفیگ اضافه‌شده: {len(links)}\n\n"
+                            f"از بخش «📒 اشتراک ها» دریافت کنید."
+                        )
+                    )
+                except Exception as e:
+                    logger.error(f"Could not notify user {sub['user_id']}: {e}")
+                await asyncio.sleep(0.05)
+
+        for key in ('addconfig_mode', 'addconfig_plan_names', 'addconfig_target_plan_name', 'addconfig_priority'):
+            context.user_data.pop(key, None)
+        return ConversationHandler.END
+
+    # ---- مسیر قبلی: تک کاربر (بدون تغییر نسبت به قبل) ----
     sub_id = context.user_data.get('addconfig_sub_id')
     priority = context.user_data.get('addconfig_priority', 1)
     target_user_id = context.user_data.get('addconfig_target')
 
     if not sub_id:
-        await update.message.reply_text("❌ خطا! لطفاً دوباره تلاش کنید.", reply_markup=get_main_menu())
+        await update.message.reply_text("❌ Error! Please try again.", reply_markup=get_main_menu())
         return ConversationHandler.END
 
     for link in links:
         db.add_manual_config(sub_id, link, priority)
 
-    admin = update.effective_user
+    subscription = db.get_subscription(sub_id)
+    target_user = db.get_user(target_user_id) if target_user_id else None
+
+    plan_name = subscription.get('plan_name') if subscription else None
+    email = subscription.get('email') if subscription else None
+    end_date = str(subscription.get('end_date'))[:10] if subscription else None
+    remaining_volume = subscription.get('remaining_volume', 0) if subscription else 0
+    vol_text = 'Unlimited' if not remaining_volume else f"{remaining_volume} GB"
+
+    user_name = (target_user.get('first_name') or str(target_user_id)) if target_user else str(target_user_id)
+    user_username = target_user.get('username') if target_user else None
+    username_display = f"@{user_username}" if user_username else "-"
+
+    priority_labels = {1: "🥇 First (Main)", 2: "🥈 Second", 3: "🥉 Third"}
+    priority_label = priority_labels.get(priority, f"#{priority}")
+
     try:
         from logger_bot import log_admin_action
         await log_admin_action(
             context.bot,
             admin_id=admin.id,
-            action="افزودن کانفیگ به اشتراک",
+            action="Add config to subscription",
             target_user_id=target_user_id,
-            details=f"🆔 اشتراک: {sub_id}\n🔢 اولویت: {priority}\n🔗 تعداد کانفیگ: {len(links)}",
+            details=(
+                f"🆔 Subscription: {sub_id}\n"
+                f"👤 Username: {username_display}\n"
+                f"📦 Plan: {plan_name or '-'}\n"
+                f"📧 Email: {email or '-'}\n"
+                f"🔢 Priority: {priority}\n"
+                f"🔗 Config count: {len(links)}"
+            ),
             username=admin.username,
             first_name=admin.first_name,
             last_name=admin.last_name
@@ -3486,16 +3797,28 @@ async def admin_addconfig_link_input(update: Update, context: ContextTypes.DEFAU
     except Exception as e:
         logger.error(f"Error logging admin action: {e}")
 
-    await update.message.reply_text(
-        f"✅ {len(links)} کانفیگ با موفقیت به اشتراک اضافه شد.",
-        reply_markup=get_main_menu()
+    confirm_text = (
+        f"✅ {len(links)} config(s) successfully added to the subscription.\n\n"
+        f"👤 User: {html_lib.escape(str(user_name))} ({username_display}) — `{target_user_id}`\n"
+        f"📦 Plan: {plan_name or '-'}\n"
+        f"📧 Email: {email or '-'}\n"
+        f"📊 Volume: {vol_text}\n"
+        f"📅 Expires: {end_date or '-'}\n"
+        f"🔢 Priority: {priority_label}"
     )
+
+    await update.message.reply_text(confirm_text, parse_mode=None, reply_markup=get_main_menu())
 
     if target_user_id:
         try:
             await context.bot.send_message(
                 chat_id=target_user_id,
-                text="🎉 کانفیگ جدیدی به یکی از اشتراک‌های شما اضافه شد. از بخش «📒 اشتراک ها» دریافت کنید."
+                text=(
+                    f"🎉 کانفیگ جدیدی به اشتراک شما اضافه شد!\n\n"
+                    f"📦 طرح: {plan_name or 'اشتراک شما'}\n"
+                    f"🔢 تعداد کانفیگ اضافه‌شده: {len(links)}\n\n"
+                    f"از بخش «📒 اشتراک ها» دریافت کنید."
+                )
             )
         except Exception as e:
             logger.error(f"Could not notify user {target_user_id}: {e}")
@@ -3503,4 +3826,253 @@ async def admin_addconfig_link_input(update: Update, context: ContextTypes.DEFAU
     for key in ('addconfig_target', 'addconfig_subs', 'addconfig_sub_id', 'addconfig_priority'):
         context.user_data.pop(key, None)
 
+    return ConversationHandler.END
+
+# ============ Admin: Edit Existing Subscription (duration/volume) ============
+async def admin_editsub_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id):
+        await query.edit_message_text("⛔️ You do not have admin access.")
+        return ConversationHandler.END
+
+    await query.edit_message_text(
+        "✏️ Edit User Subscription\n\n"
+        "👤 Please send the target user's numeric ID:\n\n"
+        "⚠️ Send /cancel to abort."
+    )
+    return ADMIN_EDITSUB_USER_ID
+
+
+async def admin_editsub_user_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    if text == "/cancel":
+        await update.message.reply_text("❌ Operation cancelled.", reply_markup=get_main_menu())
+        return ConversationHandler.END
+
+    if not text.isdigit():
+        await update.message.reply_text(
+            "❌ The ID must be numeric only. Please send it again:\n\n"
+            "⚠️ Send /cancel to abort."
+        )
+        return ADMIN_EDITSUB_USER_ID
+
+    target_user_id = int(text)
+    target_user = db.get_user(target_user_id)
+    if not target_user:
+        await update.message.reply_text(
+            "❌ No user found with this ID.\n\n"
+            "Please send a different ID or /cancel to abort."
+        )
+        return ADMIN_EDITSUB_USER_ID
+
+    subs = db.get_active_subscriptions(target_user_id)
+    if not subs:
+        await update.message.reply_text(
+            "ℹ️ This user has no active subscriptions.",
+            reply_markup=get_main_menu()
+        )
+        return ConversationHandler.END
+
+    context.user_data['editsub_target'] = target_user_id
+    context.user_data['editsub_list'] = subs
+
+    keyboard = []
+    lines = [f"👤 Active subscriptions for user <code>{target_user_id}</code>:\n"]
+    for i, sub in enumerate(subs):
+        label = sub.get('plan_name') or sub.get('email') or f"#{sub['id']}"
+        vol = sub.get('remaining_volume', 0)
+        vol_text = 'Unlimited' if not vol else f"{vol} GB"
+        lines.append(f"{i+1}. {label} - {sub['duration_days']} days - Volume: {vol_text}")
+        keyboard.append([InlineKeyboardButton(f"{i+1}. {label}", callback_data=f"admin_editsub_pick_{i}")])
+    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="admin_editsub_cancel")])
+
+    await update.message.reply_text(
+        "\n".join(lines),
+        parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return ADMIN_EDITSUB_SELECT
+
+
+async def admin_editsub_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle picking a subscription from the list, or cancel"""
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "admin_editsub_cancel":
+        await query.edit_message_text("❌ Operation cancelled.")
+        context.user_data.pop('editsub_target', None)
+        context.user_data.pop('editsub_list', None)
+        context.user_data.pop('editsub_id', None)
+        return ConversationHandler.END
+
+    idx = int(query.data.replace("admin_editsub_pick_", ""))
+    subs = context.user_data.get('editsub_list', [])
+    if idx >= len(subs):
+        await query.edit_message_text("❌ This item is no longer valid.")
+        return ConversationHandler.END
+
+    sub = subs[idx]
+    context.user_data['editsub_id'] = sub['id']
+    vol = sub.get('remaining_volume', 0)
+    vol_text = 'Unlimited' if not vol else f"{vol} GB"
+
+    keyboard = [
+        [InlineKeyboardButton("⏰ Edit Duration", callback_data="admin_editsub_field_duration")],
+        [InlineKeyboardButton("📊 Edit Volume", callback_data="admin_editsub_field_volume")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="admin_editsub_cancel")]
+    ]
+    await query.edit_message_text(
+        f"📦 Selected subscription: {sub.get('plan_name') or sub.get('email')}\n"
+        f"⏰ Current duration: {sub['duration_days']} days\n"
+        f"📊 Current volume: {vol_text}\n\n"
+        f"Which value would you like to edit?",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return ADMIN_EDITSUB_SELECT  # stay in this state until a field is picked
+
+
+async def admin_editsub_field_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "admin_editsub_field_duration":
+        await query.edit_message_text(
+            "⏰ Please enter the new duration in days (calculated from the subscription's start date):\n"
+            "Example: 30\n\n⚠️ Send /cancel to abort."
+        )
+        return ADMIN_EDITSUB_DURATION_INPUT
+
+    await query.edit_message_text(
+        "📊 Please enter the new volume in GB (enter 0 for unlimited):\n"
+        "Example: 50\n\n⚠️ Send /cancel to abort."
+    )
+    return ADMIN_EDITSUB_VOLUME_INPUT
+
+
+async def admin_editsub_duration_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    if text == "/cancel":
+        await update.message.reply_text("❌ Operation cancelled.", reply_markup=get_main_menu())
+        for k in ('editsub_target', 'editsub_list', 'editsub_id'):
+            context.user_data.pop(k, None)
+        return ConversationHandler.END
+
+    try:
+        duration = int(text)
+        if duration < 1:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("❌ Please enter a valid integer of at least 1:")
+        return ADMIN_EDITSUB_DURATION_INPUT
+
+    sub_id = context.user_data.get('editsub_id')
+    target_user_id = context.user_data.get('editsub_target')
+    if not sub_id:
+        await update.message.reply_text("❌ Error! Please try again.", reply_markup=get_main_menu())
+        return ConversationHandler.END
+
+    success = db.update_subscription_duration(sub_id, duration)
+
+    if success:
+        admin = update.effective_user
+        try:
+            from logger_bot import log_admin_action
+            await log_admin_action(
+                context.bot, admin_id=admin.id, action="Edit user subscription duration",
+                target_user_id=target_user_id,
+                details=f"🆔 Subscription: {sub_id}\n⏰ New duration: {duration} days",
+                username=admin.username, first_name=admin.first_name, last_name=admin.last_name
+            )
+        except Exception as e:
+            logger.error(f"Error logging admin action: {e}")
+
+        await update.message.reply_text(
+            f"✅ Subscription duration successfully updated to {duration} days.",
+            reply_markup=get_main_menu()
+        )
+        try:
+            await context.bot.send_message(
+                chat_id=target_user_id,
+                text=f"⚠️ مدت یکی از اشتراک‌های شما توسط پشتیبانی به {duration} روز تغییر کرد."
+            )
+        except Exception as e:
+            logger.error(f"Could not notify user {target_user_id}: {e}")
+    else:
+        await update.message.reply_text("❌ Error updating subscription. Please try again.", reply_markup=get_main_menu())
+
+    for k in ('editsub_target', 'editsub_list', 'editsub_id'):
+        context.user_data.pop(k, None)
+    return ConversationHandler.END
+
+
+async def admin_editsub_volume_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    if text == "/cancel":
+        await update.message.reply_text("❌ Operation cancelled.", reply_markup=get_main_menu())
+        for k in ('editsub_target', 'editsub_list', 'editsub_id'):
+            context.user_data.pop(k, None)
+        return ConversationHandler.END
+
+    try:
+        volume = int(text)
+        if volume < 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Please enter a valid integer (enter 0 for unlimited):"
+        )
+        return ADMIN_EDITSUB_VOLUME_INPUT
+
+    sub_id = context.user_data.get('editsub_id')
+    target_user_id = context.user_data.get('editsub_target')
+    if not sub_id:
+        await update.message.reply_text("❌ Error! Please try again.", reply_markup=get_main_menu())
+        return ConversationHandler.END
+
+    success = db.set_subscription_volume(sub_id, volume)
+
+    # If this subscription also has a real client on a panel, sync the volume there too
+    if success:
+        subscription = db.get_subscription(sub_id)
+        if subscription and subscription.get('email') and subscription.get('panel_id'):
+            try:
+                from client_manager import get_panel_client
+                panel_client = get_panel_client(subscription['panel_id'])
+                panel_client.update_client_volume(subscription['email'], volume)
+            except Exception as e:
+                logger.error(f"Error syncing volume to panel for sub {sub_id}: {e}")
+
+        admin = update.effective_user
+        try:
+            from logger_bot import log_admin_action
+            await log_admin_action(
+                context.bot, admin_id=admin.id, action="Edit user subscription volume",
+                target_user_id=target_user_id,
+                details=f"🆔 Subscription: {sub_id}\n📊 New volume: {'Unlimited' if volume == 0 else f'{volume} GB'}",
+                username=admin.username, first_name=admin.first_name, last_name=admin.last_name
+            )
+        except Exception as e:
+            logger.error(f"Error logging admin action: {e}")
+
+        await update.message.reply_text(
+            f"✅ Subscription volume successfully updated to {'Unlimited' if volume == 0 else f'{volume} GB'}.",
+            reply_markup=get_main_menu()
+        )
+        try:
+            await context.bot.send_message(
+                chat_id=target_user_id,
+                text=(
+                    f"⚠️ One of your subscriptions was updated by support: volume is now "
+                    f"{'Unlimited' if volume == 0 else f'{volume} GB'}."
+                )
+            )
+        except Exception as e:
+            logger.error(f"Could not notify user {target_user_id}: {e}")
+    else:
+        await update.message.reply_text("❌ Error updating subscription. Please try again.", reply_markup=get_main_menu())
+
+    for k in ('editsub_target', 'editsub_list', 'editsub_id'):
+        context.user_data.pop(k, None)
     return ConversationHandler.END
